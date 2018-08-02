@@ -28,9 +28,10 @@ def get_tags(data=None, error=None):
         data = this.props.data or this.state.data
         if data:
             id = data.id
-        client.call_func("get_common_tags", this.get_tags,
-                         item_type=this.state.item_type,
-                         item_id=id, limit=10)
+        if id:
+            client.call_func("get_common_tags", this.get_tags,
+                             item_type=this.state.item_type,
+                             item_id=id, limit=10)
 
 
 def get_gallery_count(data=None, error=None):
@@ -133,8 +134,6 @@ def artistprops_render():
                        as_=Link, to=utils.build_url("/library", query=url_search_query, keep_query=False)),
                      e(ui.Button, icon="heart", title=tr(this, "ui.t-show-fav-galleries", "Show favorite galleries"),
                        as_=Link, to=utils.build_url("/favorite", query=url_search_query, keep_query=False)),
-                     e(ui.Button, icon="inbox", title=tr(this, "ui.t-show-inbox-galleries", "Show galleries in inbox"),
-                       as_=Link, to=utils.build_url("/inbox", query=url_search_query, keep_query=False)),
                      basic=True,
                      size="tiny",
                      ),

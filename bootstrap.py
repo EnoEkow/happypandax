@@ -340,6 +340,22 @@ def lint(args, unknown=None):
     return run([env_python, "lint.py", *sys.argv[2:]]).returncode
 
 
+def migrate_revision(args, unk=None):
+    _activate_venv()
+    d_a = []
+    if args.dev:
+        d_a += ['-x', 'dev=true']
+    return run(["alembic", *d_a, "revision", "-m", getattr(args, "msg", "new version"), "--autogenerate"]).returncode
+
+
+def migrate_upgrade(args, unk=None):
+    _activate_venv()
+    d_a = []
+    if args.dev:
+        d_a += ['-x', 'dev=true']
+    return run(["alembic", *d_a, "upgrade", args.rev]).returncode
+
+
 def _compress_dir(dir_path, output_name, fmt="zip"):
     from happypanda.common import config
     print("Compressing {} archive...".format(fmt))
@@ -408,8 +424,7 @@ def deploy(args, unknown=None):
                                                                    '--name',
                                                                    constants.updater_name,
                                                                    '--icon',
-                                                                   os.path.join(constants.dir_static,
-                                                                                'favicon.ico'),
+                                                                   constants.favicon_path,
                                                                    '--specpath',
                                                                    'build'
                                                                    ]):
@@ -471,7 +486,10 @@ def deploy(args, unknown=None):
 
             if os.environ.get('CI'):
                 deploy_file_o = os.path.join(deploy_dir, pathlib.Path(output_path_a).name)
-                os.replace(output_path_a, deploy_file_o)
+                try:
+                    os.replace(output_path_a, deploy_file_o)
+                except FileNotFoundError as e:
+                    print(e)
 
     print("Done")
 
@@ -557,6 +575,21 @@ def main():
 
     subparser = subparsers.add_parser('lint', help='Linting, args are forwarded')
     subparser.set_defaults(func=lint)
+
+    subparser = subparsers.add_parser('migrate', help='Migration tool')
+    subparser.add_argument('-d', '--dev', action='store_true', help="dev mode")
+    subparser.set_defaults(func=migrate_revision)
+    subsubparsers = subparser.add_subparsers(description='Specify an action before "--help" to show parameters for it.',
+                                             metavar='ACTION', dest='action')
+    subsubparser = subsubparsers.add_parser('revision', help='Add a new revision')
+    subsubparser.set_defaults(func=migrate_revision)
+    subsubparser.add_argument('msg', help="revision message")
+    subsubparser.add_argument('-d', '--dev', action='store_true', help="dev mode")
+
+    subsubparser = subsubparsers.add_parser('upgrade', help='Upgrade to a revision')
+    subsubparser.set_defaults(func=migrate_upgrade)
+    subsubparser.add_argument('rev', help="revision", default="head", nargs="?")
+    subsubparser.add_argument('-d', '--dev', action='store_true', help="dev mode")
 
     subparser = subparsers.add_parser('deploy', help='Deploy on current platform')
     subparser.set_defaults(func=deploy)

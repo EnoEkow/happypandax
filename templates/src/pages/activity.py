@@ -28,7 +28,7 @@ def get_progress(data=None, error=None):
 
 def page_mount():
     this.get_progress()
-    this.interval_func = setInterval(this.get_progress, 1500)
+    this.interval_func = setInterval(this.get_progress, 1300)
 
 
 def page_render():

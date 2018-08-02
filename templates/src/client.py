@@ -13,6 +13,35 @@ __pragma__('noskip')
 io = require('socket.io-client')
 
 
+class TemporaryViewType:
+    #: Contains gallery items to be added
+    GalleryAddition = 1
+
+
+class CommandState:
+
+    #: command has not been put in any service yet
+    out_of_service = 0
+
+    #: command has been put in a service (but not started or stopped yet)
+    in_service = 1
+
+    #: command has been scheduled to start
+    in_queue = 2
+
+    #: command has been started
+    started = 3
+
+    #: command has finished succesfully
+    finished = 4
+
+    #: command has been forcefully stopped without finishing
+    stopped = 5
+
+    #: command has finished with an error
+    failed = 6
+
+
 class ItemType:
     #: Gallery
     Gallery = 1
@@ -54,12 +83,18 @@ class ImageSize:
 
 
 class ViewType:
-    #: Library
+    #: Contains all items except items in Trash
+    All = 6
+    #: Contains all items except items in Inbox and Trash
     Library = 1
-    #: Favourite
+    #: Contains all favourite items (mutually exclusive with items in Inbox)
     Favorite = 2
-    #: Inbox
+    #: Contains only items in Inbox
     Inbox = 3
+    #: Contains only items in Trash
+    Trash = 4
+    #: Contains only items in ReadLater
+    ReadLater = 5
 
 
 class ItemSort:
@@ -134,6 +169,7 @@ class PushID():
 
 
 def log(msg):
+    print(msg)
     if state.debug:
         print(msg)
 
@@ -220,6 +256,7 @@ class Client(Base):
         self._poll_interval = 5
         self._poll_timeout = 1000 * 60 * 120
         self._last_retry = __new__(Date()).getTime()
+        self._prev_retry_interval = 0
 
         self.polling = False
         if not Client.polling:
@@ -266,19 +303,22 @@ class Client(Base):
             last_interval = 100
             if self._retries is None:
                 self._retries = list(range(10, last_interval + 10, 10))  # secs
-            i = self._retries.pop(0) if self._retries else last_interval
+            self._prev_retry_interval = self._retries.pop(0) if self._retries else last_interval
             if self._connection_status:
-                i = 0
+                self._prev_retry_interval = 0
             else:
-                self.reconnect(i)
+                self.reconnect(self._prev_retry_interval)
         else:
-            i = 5
-        return i * 1000
+            if not self._prev_retry_interval:
+                self._prev_retry_interval = 5
+        return self._prev_retry_interval * 1000
     __pragma__("notconv")
 
     __pragma__("kwargs")
 
     def reconnect(self, interval=None):
+        if not state['active']:
+            return
         if state.app:
             state.app.notif("Trying to establish server connection{}".format(
                 ", trying again in {} seconds".format(interval) if interval else ""
@@ -314,6 +354,7 @@ class Client(Base):
                 self.call_func("get_config", self._set_debug, cfg={'core.debug': False})
                 self.call_func("get_locales", self._set_locales)
                 self.call_func("check_update", push=True)
+                self.get_translations()
         else:
             if state['app']:
                 state['app'].on_login(state['accepted'])
@@ -364,15 +405,22 @@ class Client(Base):
                 self.socket.emit("server_call", serv_msg._msg)
                 return
             if serv_msg.func_name and serv_data:
-                for func in serv_data.data:
-                    err = None
-                    if 'error' in func:
-                        err = func['error']
-                        self.flash_error(err)
-                    if func['fname'] == serv_msg.func_name:
-                        if serv_msg.callback:
-                            serv_msg.call_callback(func['data'], err)
-                        break
+                if serv_data.data != None:  # noqa: E711
+                    for func in serv_data.data:
+                        err = None
+                        if 'error' in func:
+                            err = func['error']
+                            self.flash_error(err)
+                        if func['fname'] == serv_msg.func_name:
+                            if serv_msg.callback:
+                                serv_msg.call_callback(func['data'], err)
+                            break
+                else:
+                    if serv_msg.callback:
+                        err = None
+                        if serv_data['error']:
+                            err = serv_data['error']
+                        serv_msg.call_callback(None, err)
             else:
                 if serv_msg.callback:
                     serv_msg.call_callback(serv_data, None)
@@ -422,6 +470,15 @@ class Client(Base):
         l = "{}-{}".format(a, b.upper())
         utils.moment.locale(l)
 
+    __pragma__("kwargs")
+
+    def get_translations(self, data=None, error=None, locale=None):
+        if data is not None and not error:
+            state['translations'] = data
+        else:
+            self.call_func("get_translations", self.get_translations, locale=locale)
+    __pragma__("nokwargs")
+
     def _set_debug(self, data):
         state.debug = data['core.debug']
         if state.app:
@@ -444,10 +501,12 @@ commandclient = Client("command", namespace="/command")
 
 
 class Command(Base):
+    __pragma__("kwargs")
 
-    def __init__(self, command_ids, customclient=None):
+    def __init__(self, command_ids, customclient=None, daemon=True):
         super().__init__()
         assert command_ids is not None
+        self.daemon = daemon
         self._single_id = None
         if isinstance(command_ids, int):
             self._single_id = command_ids
@@ -463,6 +522,7 @@ class Command(Base):
         self._on_each = False
         self._complete_callback = None
         self._progress_callback = None
+        self._error = False
         self.commandclient = commandclient
 
         for i in self._command_ids:
@@ -470,6 +530,7 @@ class Command(Base):
 
         if customclient:
             self.commandclient = customclient
+    __pragma__("nokwargs")
 
     __pragma__('iconv')
 
@@ -479,7 +540,7 @@ class Command(Base):
                 str_i = str(i)
                 self._states[str_i] = data[str_i]
         elif error:
-            pass
+            self._error = True
         else:
             self.commandclient.call_func("get_command_state", self._check_status, command_ids=self._command_ids)
     __pragma__('noiconv')
@@ -493,7 +554,10 @@ class Command(Base):
                 str_i = str(i)
                 self._states[str_i] = data[str_i]
         elif error:
-            pass
+            if "does not exist" in error['msg']:
+                for i in self._command_ids:
+                    str_i = str(i)
+                    self._states[str_i] = CommandState.stopped
         else:
             self._stopped = True
             self.commandclient.call_func("stop_command", self.stop, command_ids=self._command_ids)
@@ -519,13 +583,13 @@ class Command(Base):
 
     __pragma__('kwargs')
 
-    def poll_until_complete(self, interval=1000 * 5, timeout=1000 * 60 * 10, callback=None):
+    def poll_until_complete(self, interval=1000 * 5, timeout=1000 * 60 * 120, callback=None):
         "Keep polling for command state until it has finished running"
         self._complete_callback = callback
         if not self.finished():
 
             def _poll():
-                if state.connected:
+                if state.connected and not self._error:
                     self._fetch_value()
                     if not self.finished():
                         self._check_status()
@@ -556,20 +620,22 @@ class Command(Base):
                 str_i = str(i)
                 self._progress[str_i] = data[str_i]
         elif error:
-            pass
+            self._error = True
         else:
             self.commandclient.call_func("get_command_progress", self._fetch_progress, command_ids=self._command_ids)
     __pragma__('noiconv')
 
     __pragma__('kwargs')
 
-    def poll_progress(self, interval=1000 * 3, timeout=1000 * 60 * 10, callback=None):
+    def poll_progress(self, interval=1000 * 3, timeout=1000 * 60 * 120, callback=None):
         "Keep polling for command progress until it has finished running"
         self._progress_callback = callback
         if not self.finished():
 
             def _poll():
-                if state.connected:
+                if state.connected and not self._error:
+                    if not self.finished():
+                        self._check_status()
                     self._fetch_progress()
                     if self._progress_callback:
                         self._progress_callback(self)
@@ -602,7 +668,7 @@ class Command(Base):
 
             self._getting_value = False
         elif error:
-            pass
+            self._error = True
         else:
             if self.finished(self._on_each) and not self._getting_value and not self._stopped:
                 if not cmd_ids:

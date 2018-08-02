@@ -1,9 +1,9 @@
 Plugins
 ========================================
 
-HPX is built in a way that makes it possible to step in and modify the way a functionality works or even add new ones with ease with plug-ins.
+HPX is built in a way that makes it possible to step in and modify the way a functionality works or even add new ones with ease through plugins.
 
-Plug-ins can be written in ``Python 3`` up to``Python 3.6``.
+Plugins can be written in ``Python 3`` up to ``Python 3.6``.
 Note that you don't need to be running HPX from source to develop a plugin.
 
 Here you will learn how to create a HPX plugin and use it to extend HPX.
@@ -39,7 +39,7 @@ Now that we understand some basic concepts it's time to create a plugin.
 
 HPX makes it very easy to create and write a plugin.
 
-Plug-ins are contained in their own folder, so we start by creating one for our plugin::
+Plugins are contained in their own folder, so we start by creating one for our plugin::
 
     -/..
     -MyPlugin/
@@ -67,7 +67,7 @@ A manifest file is a file describing a plugin. Inside ``hplugin.json`` is::
         ]
     }
 
-* ``id``: A UUID4 string. Unique across all plug-ins. This attribute is required to be present.
+* ``id``: A UUID4 string. Unique across all plugins. This attribute is required to be present.
 * ``entry``: Path to the entry python file. Path is relative to this folder and must exist. This attribute is required to be present.
 * ``shortname``: Your plugin name in short form. Must be all lowercase and cannot exceed ``20`` characters nor contain any whitespace. This attribute is required to be present.
 * ``name``: Name of your plugin. This attribute is required to be present.
@@ -81,11 +81,11 @@ A manifest file is a file describing a plugin. Inside ``hplugin.json`` is::
 * ``description``: A description of your plugin. This attribute is required to be present.
 * ``test``: Path to the entry file for tests. Path is relative to this folder and must exist. This attribute is optional.
 * ``website``: A url to a website for the plugin, author, etc. This attribute is optional.
-* ``require``: A list of strings defining other plug-ins as dependencies. This attribute is optional.
+* ``require``: A list of strings defining other plugins as dependencies. This attribute is optional.
 
     A requirement must conform :pep:`508` with a few exceptions.
 
-    Other plug-ins can be referred to by their id or shortname.
+    Other plugins can be referred to by their id or shortname.
 
     Examples of requirements that conforms :pep:`508`::
 
@@ -113,8 +113,8 @@ After creating and defining a manifest file and create the entry files our final
         - main.py
         - test.py
 
-And that's it! We can now have HPX load our plugin. To do that, place the plugin folder into one of the locations where HPX looks for plug-ins.
-The default location is the ``plugins`` folder that exists inside the HPX root folder. It is also possible to define an additional location where to also look for plug-ins
+And that's it! We can now have HPX load our plugin. To do that, place the plugin folder into one of the locations where HPX looks for plugins.
+The default location is the ``plugins`` folder that exists inside the HPX root folder. It is also possible to define an additional location where to also look for plugins
 through the setting ``plugin.plugin_dir``.
 
 .. note::
@@ -140,7 +140,7 @@ These are the different kind of states a plugin can be in: :class:`PluginState <
 Interfacing with HPX
 ****************************************
 
-HPX plug-ins in a special environment with a special module named ``__hpx__`` to interface with HPX.
+HPX plugins run in a special environment with a special module named ``__hpx__`` to interface with HPX.
 
 After a plugin has been registered, it can be installed. Installation has to be manually done by the user unless either of the two settings ``plugin.auto_install_plugin`` and ``plugin.auto_install_plugin_dependency``
 are true.
@@ -174,14 +174,14 @@ With all this in mind, we can now write code to interface with HPX. In the ``mai
         main()
 
 As you can see, we can write our code just like how we would write any regular Python program.
-HPX gives this flexibility and freedom to its plug-ins.
+HPX gives this flexibility and freedom to its plugins.
 
 The contents of the ``__hpx__`` module can be found at :ref:`Plugin API`, however, the most important methods from the module which we will cover here are
 :meth:`attach <happypanda.core.plugin_interface.attach>` and :meth:`subscribe <happypanda.core.plugin_interface.subscribe>`.
 
 The main point of a HPX plugin is to use these methods to extend what HPX is capable of.
-
 Just like previously mentioned, HPX provides many **commands** that defines different entrypoints and events that we can use.
+
 The method :meth:`subscribe <happypanda.core.plugin_interface.subscribe>` subscribes a handler function that we define to a command event.
 HPX defines the plugin events ``init`` and ``disable`` that we can listen to.
 We can use these events to initialize/terminate our stuff::
@@ -214,7 +214,7 @@ While it is true that we could also initialize on the module level, it is safer 
 Logging and errors
 ****************************************
 
-HPX provides a logging facility for its plug-ins.
+HPX provides a logging facility for its plugins.
 
 When a plugin has been registered, a folder called ``logs`` is created in the plugin's folder. In this folder will reside ``plugin.log`` and ``plugin_debug.log``.
 
@@ -228,7 +228,7 @@ This can produce logs that are very confusing and useless to others.
 The ``plugin_debug.log`` is also special in that its contents will be reset on every run.
 
 These two files contain logs pertaining to the plugin in question.
-HPX also has its own ``plugin.log`` found at ``[HPX]/logs/plugin.log`` that contain logs produced by all plug-ins (basically a combination of every plugin's exclusive log).
+HPX also has its own ``plugin.log`` found at ``[HPX]/logs/plugin.log`` that contain logs produced by all plugins (basically a combination of every plugin's exclusive log).
 
 Debugging
 ****************************************
@@ -254,9 +254,9 @@ About thread safety
 How to not break stuff
 ****************************************
 
-While HPX provides plug-ins lots of freedom, this can sometimes lead to plug-ins being able to disrupt the flow of the program and/or create inexplicable bugs,
+While HPX provides plugins lots of freedom, this can sometimes lead to plugins being able to disrupt the flow of the program and/or create inexplicable bugs,
 and generally make it so things are not working as intended.
-Which is why care must be taken when writing plug-ins.
+Which is why care must be taken when writing plugins.
 
 Here are some **DO**'s and **DON'T**'s that should ensure that everything plays nicely together.
 
@@ -265,6 +265,28 @@ Here are some **DO**'s and **DON'T**'s that should ensure that everything plays 
 * **DO** always prefer the :ref:`Plugin API` instead of rolling your own thing. If you think the API is limited and doesn't allow doing what you want to, consider opening a PR on Github instead.
 * **DO** always prefer using the **commands** that HPX provides, especially because it allows other things that are beyond your control a chance to run.
 * **DO** keep everything you produce in the plugin's own folder when possible. Use ``__hpx__.constants.current_dir`` to retrieve the path to the plugin's folder.
+
+Importing modules and packages
+****************************************
+
+Importing modules works as expected and, other than ``happypanda``, all available modules can be imported normally::
+
+    import modulename
+    # .. code
+
+It is also possible to import modules that you create yourself. Just put the file/folder in your plugin directory alongside your entry file and import it normally.
+
+See :ref:`Available packages` for a list of all available modules in an HPX installation.
+
+Importing external packages
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+If you need an external package that is not listed in :ref:`Available packages` then here's what you can do.
+
+.. todo::
+
+    external packages
+
 
 Available packages
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

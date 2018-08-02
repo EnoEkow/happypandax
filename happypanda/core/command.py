@@ -117,7 +117,9 @@ class CoreCommand:
         self._progress_time = arrow.now()
 
     def merge(self, cmd):
-        ""
+        """
+        Merge this command into given command
+        """
         assert cmd is None or isinstance(cmd, CoreCommand)
         if cmd:
             self.merge_progress_into(cmd)
@@ -158,6 +160,7 @@ class CoreCommand:
                  'percent': .0,
                  'max': .0,
                  'type': self._progress_type,
+                 'state': self.state.value if hasattr(self, "state") else None,
                  'timestamp': self._progress_timestamp}
 
             t = self._progress_tree.subtree(self._progress_count)
@@ -201,10 +204,15 @@ class CoreCommand:
         if type_ is not None:
             self._progress_type = type_
 
-    def set_max_progress(self, value):
+    def set_max_progress(self, value, add=False):
         assert isinstance(value, (int, float))
         self._add_progress()
-        self._progress_max = value
+        if add:
+            if self._progress_max is None:
+                self._progress_max = 0
+            self._progress_max += value
+        else:
+            self._progress_max = value
 
     def next_progress(self, add=1, text=None, _from=0):
         assert isinstance(add, (int, float))
@@ -213,6 +221,7 @@ class CoreCommand:
         if text is not None:
             self._progress_text = text
         self._progress_current += add
+        utils.switch(self._priority)
 
     @contextmanager
     def progress(self, max_progress=None, text=None):
@@ -247,8 +256,9 @@ class CoreCommand:
               )
 
     def __del__(self):
-        if self._progress_count and self._progress_count in self._progresses:
-            del self._progresses[self._progress_count]
+        if hasattr(self, '_progress_count') and hasattr(self, '_progresses'):
+            if self._progress_count and self._progress_count in self._progresses:
+                del self._progresses[self._progress_count]
 
     @classmethod
     def _get_commands(cls, self=None):
@@ -276,6 +286,7 @@ class Command(CoreCommand, metaclass=ABCMeta):
 
     def __init__(self, priority=constants.Priority.Normal):
         super().__init__(priority)
+        self.state = CommandState.out_of_service
         self._main = self.main
         self.main = self._main_wrap
 
@@ -328,7 +339,6 @@ class AsyncCommand(Command):
         self._service = service
         self._args = None
         self._kwargs = None
-        self.state = CommandState.out_of_service
         self.exception = None
 
         if self._service:
@@ -582,5 +592,5 @@ class CParam:
         self.__doc__ = inspect.cleandoc(__doc__)
 
 
-def init_commands():
+def setup_commands():
     CoreCommand._native_pool = ThreadPool(constants.maximum_native_workers)

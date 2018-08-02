@@ -130,6 +130,7 @@ class GetModelImage(AsyncCommand):
 
         self.next_progress()
         if generate:
+            constants.task_command.thumbnail_cleaner.wake_up()
             self.cover = self.run_native(self._generate_and_add, img_hash, old_img_hash, generate,
                                          model, item_id, image_size, profile_size).get()
         self.cover_event.emit(self.cover)
@@ -283,8 +284,14 @@ class GetModelClass(Command):
         super().__init__()
 
     def main(self, model_name: str) -> db.Base:
+        e = False
+        try:
+            if not hasattr(db, model_name) or not issubclass(getattr(db, model_name), db.Base):
+                e = True
+        except TypeError:
+            e = True
 
-        if not hasattr(db, model_name):
+        if e:
             raise exceptions.CoreError(
                 utils.this_command(self),
                 "No database model named '{}'".format(model_name))
@@ -431,7 +438,7 @@ class GetDatabaseSort(Command):
         return {
             ItemSort.GalleryRandom.value: (func.random(),),
             ItemSort.GalleryTitle.value: (db.Title.name,),
-            ItemSort.GalleryArtist.value: (db.AliasName.name,),
+            ItemSort.GalleryArtist.value: (db.ArtistName.name,),
             ItemSort.GalleryDate.value: (db.Gallery.timestamp,),
             ItemSort.GalleryPublished.value: (db.Gallery.pub_date,),
             ItemSort.GalleryRead.value: (db.Gallery.last_read,),
@@ -503,8 +510,8 @@ class GetDatabaseSort(Command):
     @orderby.default(capture=True)
     def _aliasname_orderby(model_name, capture=tuple(db.model_name(x) for x in (db.Artist, db.Parody))):
         return {
-            ItemSort.ArtistName.value: (db.AliasName.name,),
-            ItemSort.ParodyName.value: (db.AliasName.name,),
+            ItemSort.ArtistName.value: (db.ArtistName.name,),
+            ItemSort.ParodyName.value: (db.ParodyName.name,),
         }
 
     @joins.default(capture=True)
@@ -565,9 +572,9 @@ class GetModelItems(Command):
 
     Args:
         model: a database model item
-        ids: a set of item ids
+        ids: fetch items in this set of item ids or set ``None`` to fetch all
         columns: a tuple of database item columns to fetch
-        limit: amount to limit the results
+        limit: amount to limit the results, set ``None`` for no limit
         offset: amount to offset the results
         count: only return the count of items
         filter: either a textual SQL criterion or a database criterion expression (can also be a tuple)
@@ -602,7 +609,10 @@ class GetModelItems(Command):
         if offset:
             q = q.offset(offset)
 
-        return q.limit(limit).all()
+        if limit:
+            q = q.limit(limit)
+
+        return q.all()
 
     def _get_sql(self, expr):
         if isinstance(expr, str):
@@ -672,6 +682,8 @@ class GetModelItems(Command):
                     fetched_list = [x for x in q.all() if x[0] in ids]
                 else:
                     fetched_list = [x for x in q.all() if x.id in ids]
+                    if not limit:
+                        limit = len(fetched_list)
                     fetched_list = fetched_list[offset:][:limit]
 
                 self.fetched_items = tuple(fetched_list) if not count else len(fetched_list)
@@ -720,3 +732,82 @@ class MostCommonTags(Command):
         ).group_by(db.NamespaceTags).order_by(
             db.desc_expr(db.func.count(db.NamespaceTags.id))).limit(limit).all()
         return tuple(r)
+
+
+def _get_add_item_options():
+    return {
+        config.add_to_inbox.fullname: config.add_to_inbox.value,
+    }
+
+
+class AddItem(AsyncCommand):
+    """
+    Add a database item
+    """
+
+    @async_utils.defer
+    def _add_to_db(self, items, options):
+        with db.safe_session() as sess:
+            with db.no_autoflush(sess):
+                obj_types = set()
+                for i in items:
+                    if isinstance(i, io_cmd.GalleryFS):
+                        i.load_all()
+                        i = i.gallery
+                    if isinstance(i, db.Gallery):
+                        if options.get(config.add_to_inbox.fullname):
+                            i.update('metatags', name=db.MetaTag.names.inbox)
+                    obj_types.add(type(i))
+                    i_sess = db.object_session(i)
+                    if i_sess and i_sess != sess:
+                        i_sess.expunge_all()  # HACK: what if other sess was in use?
+                    sess.add(i)
+                    self.next_progress()
+                sess.commit()
+                if db.Gallery in obj_types:
+                    constants.invalidator.similar_gallery = True
+
+    def main(self, items: typing.List[typing.Union[db.Base, io_cmd.GalleryFS]], options: dict={}) -> bool:
+        assert isinstance(items, (list, tuple, db.Base, io_cmd.GalleryFS)), f"not {items}"
+        if not isinstance(items, (list, tuple)):
+            items = [items]
+        self.set_progress(type_=enums.ProgressType.ItemAdd)
+        self.set_max_progress(len(items))
+        item_options = _get_add_item_options()
+        item_options.update(options)
+        self._add_to_db(items, item_options).get()
+        return True
+
+
+def _get_del_item_options():
+    return {
+    }
+
+# class DeleteItem(AsyncCommand):
+#    """
+#    Delete a database item
+#    """
+
+#    @async_utils.defer
+#    def _del_from_db(self, items, options):
+#        with db.safe_session() as sess:
+#            with db.no_autoflush(sess):
+#                obj_types = set()
+#                for i in items:
+#                    obj_types.add(type(i))
+#                    i.delete()
+#                    self.next_progress()
+#                sess.commit()
+#                if db.Gallery in obj_types:
+#                    constants.invalidator.similar_gallery = True
+
+#    def main(self, items: typing.List[db.Base], options: dict={}) -> bool:
+#        assert isinstance(items, (list, tuple, db.Base)), f"not {items}"
+#        if not isinstance(items, (list, tuple)):
+#            items = [items]
+#        self.set_progress(type_=enums.ProgressType.ItemRemove)
+#        self.set_max_progress(len(items))
+#        item_options = _get_del_item_options()
+#        item_options.update(options)
+#        self._del_from_db(items, item_options).get()
+#        return True

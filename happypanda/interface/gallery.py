@@ -51,7 +51,7 @@ def _get_similar(kwargs, similar_items):
         db_items = {}  # needed to sort them the way they came in
         for g in database_cmd.GetModelItems().run(kwargs['db_model'], set(similar_items)):
             db_items[g.id] = g
-        [items.append(db_items[x]) for x in similar_items]
+        [items.append(db_items[x]) for x in similar_items if x in db_items]
 
     [item_list.append(kwargs['db_msg'](x)) for x in items]
     return item_list
@@ -235,10 +235,10 @@ def open_gallery(item_id: int=0, item_type: enums.ItemType = enums.ItemType.Gall
                 item_id))
     p = p[0]
     if item_type == enums.ItemType.Page:
-        kwargs['gallery_id'] = p[0]
+        kwargs['gallery_or_id'] = p[0]
         kwargs['number'] = p[1]
     else:
-        kwargs["gallery"] = p
+        kwargs["gallery_or_id"] = p
 
     if viewer_args:
         kwargs['args'] = tuple(x.strip() for x in viewer_args.split())
@@ -246,3 +246,54 @@ def open_gallery(item_id: int=0, item_type: enums.ItemType = enums.ItemType.Gall
     opened = gallery_cmd.OpenGallery().run(**kwargs)
 
     return message.Identity("status", opened)
+
+
+def scan_galleries(path: str, scan_options: dict = {}):
+    """
+    Scan for galleries in the given directory/archive
+
+    Args:
+        path: path to directory/archive that exists on this system
+        scan_options: options to apply to the scanning process, see :ref:`Settings` for available scanning options
+
+    Returns:
+        .. code-block:: guess
+
+            {
+                'command_id': int,
+                'view_id': int
+            }
+
+    |async command|
+
+    |temp view|
+    """
+    path = io_cmd.CoreFS(path)
+    if not path.exists:
+        raise exceptions.CoreError(utils.this_function(), f"Path does not exists on this system: '{path.path}'")
+
+    view_id = next(constants.general_counter)
+    cmd_id = gallery_cmd.ScanGallery(services.AsyncService.generic).run(path, scan_options, view_id=view_id)
+
+    return message.Identity('data', {'command_id': cmd_id,
+                                     'view_id': view_id})
+
+
+def load_gallery_from_path(path: str = ""):
+    """
+    Load gallery data from a path
+
+    Args:
+        path: a supported path (note that the path must exist on this system if path points to a file/directory)
+
+    Returns:
+        .. code-block:: guess
+
+            a GalleryFS message object
+
+    """
+    gfs = io_cmd.GalleryFS(path)
+    gfs.load_metadata()
+    gfs.load_pages()
+    gfs.check_exists()
+    return message.GalleryFS(gfs)

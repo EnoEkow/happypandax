@@ -2,10 +2,12 @@
 import sys
 import rarfile
 import enum
+import itertools
+import weakref
 
 rarfile.PATH_SEP = '/'
 
-preview = True
+preview = False
 dev = False
 dev_db = False
 is_installed = os.path.exists(".installed")  # user installed with installer
@@ -33,10 +35,10 @@ updater_name = "happyupd"  # windows will make it require escalted priv. if name
 updater_key = "updater"
 
 ## VERSIONING ##
-build = 127
-version = (0, 0, 14)
-version_db = (0, 0, 5)
-version_web = (0, 0, 13)
+build = 134
+version = (0, 2, 0)
+version_db = (0, 1, 1)
+version_web = (0, 2, 0)
 version_str = ".".join(str(x) for x in version)
 version_db_str = ".".join(str(x) for x in version_db)
 version_web_str = ".".join(str(x) for x in version_web)
@@ -67,16 +69,23 @@ db_name = "happypanda"
 db_name_dev = "happypanda_dev"
 db_path = os.path.join(dir_root, dir_data, db_name + '.db')
 db_path_dev = os.path.join(dir_root, dir_data, db_name_dev + '.db')
-internal_db_path = os.path.join(dir_data, "internals")
+internal_db_path = os.path.join(dir_data, "internals.db")
+favicon_path = os.path.join(dir_static, "favicon", "favicon.ico")
+
+migration_config_path = os.path.join(dir_root, "alembic.ini")
 
 thumbs_view = "/thumb"
 link_ext = '.link'
 
 # CORE
+store = None
 invalidator = None
 internaldb = None
 web_proc = None  # webserver process
 notification = None  # ClientNotifications
+
+general_counter = itertools.count(50)
+default_temp_view_id = 1
 
 notif_normal_timeout = 45
 notif_small_timeout = 15
@@ -98,6 +107,21 @@ log_ns_gui = '[gui].'
 log_ns_network = '[network].'
 log_ns_search = '[search].'
 log_ns_misc = '[misc].'
+log_namespaces = (x[:-1] for x in (
+    log_ns_core,
+    log_ns_command,
+    log_ns_plugin,
+    log_ns_database,
+    log_ns_server,
+    log_ns_client,
+    log_ns_gui,
+    log_ns_network,
+    log_ns_search,
+    log_ns_misc,
+    log_ns_plugincontext
+))
+
+task_command = None  # TaskService.TaskList of TaskService commands
 
 
 class Dialect:
@@ -146,6 +170,8 @@ image_sizes = {
 
 translations = None  # dict of available translation files
 
+services = weakref.WeakValueDictionary()  # servicetype.service_name (all lowercase)
+
 # PLUGIN
 
 plugin_interface_name = "__hpx__"
@@ -159,6 +185,8 @@ db_session = None
 _db_scoped_session = None
 default_user = None
 special_namespace = "__namespace__"
+
+scheduler_database_url = os.path.join("sqlite:///", dir_data, "scheduler.db")
 
 # SERVER
 

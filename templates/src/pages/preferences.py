@@ -62,11 +62,12 @@ def pref_view(props):
                            label=tr(props.tab, "ui.t-language", "Language"),
                            onChange=lambda e, d: all((utils.storage.set("locale", d.value),
                                                       props.upd("client.translation_locale", d.value),
-                                                      client.set_locale(d.value))),
+                                                      client.set_locale(d.value),
+                                                      client.get_translations(locale=d.value))),
                            ))
             items.append(h("p", h("a", tr(props.tab, "ui.t-help-translate",
                                           "Not satisfied with the translation? Consider helping out"),
-                                  href="https://happypandax.github.io/happypandax/translation.html",
+                                  href="https://happypandax.github.io/translation.html",
                                   target="_blank")))
             if state.debug:
                 items.append(e(ui.Form.Field,
@@ -133,6 +134,19 @@ def pref_general(props):
                              defaultChecked=cfg.gallery.send_path_to_first_file,
                              onChange=lambda e, d: props.upd("gallery.send_path_to_first_file", d.checked),
                              disabled=not is_same_machine(),
+                             ))
+                         )
+
+    if defined(cfg.gallery):
+        items.append(e(ui.Header, tr(props.tab, "general.db-item-gallery", "Gallery"), size="small", dividing=True))
+
+        if defined(cfg.gallery.auto_rate_on_favorite):
+            items.append(e(ui.Form.Field,
+                           e(ui.Checkbox,
+                             toggle=True,
+                             label=tr(props.tab, "ui.t-auto-rate-on-favorite", "Auto rate gallery on favorite"),
+                             defaultChecked=cfg.gallery.auto_rate_on_favorite,
+                             onChange=lambda e, d: props.upd("gallery.auto_rate_on_favorite", d.checked),
                              ))
                          )
 
@@ -452,4 +466,4 @@ PrefTab = createReactClass({
                                          location.reload(False) if this.state.refresh else None)),
 
     'render': preftab_render
-})
+}, pure=True)

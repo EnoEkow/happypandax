@@ -9,8 +9,7 @@ import subprocess
 import math
 
 from happypanda.common import utils, hlogger, config, exceptions, constants
-from happypanda.core.command import (UndoCommand, CommandEvent,
-                                     CommandEntry, Command, AsyncCommand, CParam)
+from happypanda.core.command import (CommandEvent, CommandEntry, Command, AsyncCommand, CParam)
 from happypanda.core.commands import database_cmd, io_cmd
 from happypanda.interface import enums
 from happypanda.core import db, async_utils
@@ -18,13 +17,90 @@ from happypanda.core import db, async_utils
 log = hlogger.Logger(constants.log_ns_command + __name__)
 
 
-class AddGallery(UndoCommand):
+def _get_scan_options():
+    return {
+        config.skip_existing_galleries.fullname: config.skip_existing_galleries.value,
+    }
+
+
+class ScanGallery(AsyncCommand):
     """
-    Add a gallery
     """
 
-    def __init__(self):
-        super().__init__()
+    _discover: tuple = CommandEntry("discover",
+                                    CParam("path", str, "path to folder or archive"),
+                                    CParam("options", dict, "a of options to be applied to the scan"),
+                                    __doc="""
+                            Called to find any valid galleries in the given path
+                            """,
+                                    __doc_return="""
+                            a tuple of absolute paths or tuples to valid galleries found in the given directory/archive,
+                            related galleries are put in their own tuple
+                            """)
+
+    @_discover.default()
+    def _find_galleries(path, options):
+        path = io_cmd.CoreFS(path)
+        archive_formats = io_cmd.CoreFS.archive_formats()
+        found_galleries = []
+        if path.is_archive or path.inside_archive:
+            raise NotImplementedError
+        else:
+            contents = os.scandir(str(path))
+            for p in contents:
+                if p.is_file() and not p.path.endswith(archive_formats):
+                    continue
+                found_galleries.append(os.path.abspath(p.path))
+
+        return tuple(found_galleries)
+
+    @async_utils.defer
+    def _generate_gallery_fs(self, found_paths, options):
+        paths_len = len(found_paths)
+        galleries = []
+        sess = constants.db_session()
+        with db.no_autoflush(sess):
+            for n, p in enumerate(found_paths, 1):
+                self.next_progress(text=f"[{n}/{paths_len}] {p}")
+                if options.get(config.skip_existing_galleries.fullname):
+                    if db.Gallery.exists_by_path(p):
+                        continue
+                g = io_cmd.GalleryFS(p)
+                if g.evaluate():
+                    g.load_all()
+                    self.set_progress(text=f"[{n}/{paths_len}] {g.path.path} .. OK")
+                    galleries.append(g)
+        return galleries
+
+    def main(self, path: typing.Union[str, io_cmd.CoreFS], options: dict={},
+             view_id: int=None, auto_add: bool=False) -> typing.List[io_cmd.GalleryFS]:
+        fs = io_cmd.CoreFS(path)
+        galleries = []
+        self.set_progress(title=fs.path, text=fs.path, type_=enums.ProgressType.GalleryScan)
+        self.set_max_progress(1)
+        if fs.is_dir or fs.is_archive:
+            scan_options = _get_scan_options()
+            scan_options.update(options)
+            found_paths = set()
+            if fs.exists:
+                with self._discover.call(fs.path, scan_options) as plg:
+                    for p in plg.all(default=True):
+                        [found_paths.add(os.path.normpath(x)) for x in p]
+
+            paths_len = len(found_paths)
+            log.d("Found", paths_len, "gallery candidates")
+
+            self.set_max_progress(paths_len, add=True)
+            view_id = view_id if view_id else constants.default_temp_view_id
+            galleries = self._generate_gallery_fs(found_paths, scan_options).get()
+            [x.add(view_id=view_id) for x in galleries]
+            if auto_add:
+                raise NotImplementedError
+                #add_cmd = AddGallery()
+
+        self.next_progress(text="")
+
+        return galleries
 
 
 class SimilarGallery(AsyncCommand):
@@ -42,25 +118,26 @@ class SimilarGallery(AsyncCommand):
 
     def main(self, gallery_or_id: db.Gallery) -> typing.List[db.Gallery]:
         gid = gallery_or_id.id if isinstance(gallery_or_id, db.Gallery) else gallery_or_id
+        gid = str(gid)  # because JSON keys are str
         gl_data = {}
         all_gallery_tags = {}
         self.set_progress(type_=enums.ProgressType.Unknown)
         self.set_max_progress(1)
-        with utils.intertnal_db() as idb:
-            if not constants.invalidator.similar_gallery:
-                gl_data = idb.get(constants.internaldb.similar_gallery_calc.key, gl_data)
+        idb = constants.internaldb
+        if not constants.invalidator.similar_gallery:
+            gl_data = idb.get(constants.internaldb.similar_gallery_calc.key, gl_data)
             all_gallery_tags = idb.get(constants.internaldb.similar_gallery_tags.key, all_gallery_tags)
         log.d("Cached gallery tags", len(all_gallery_tags))
         if gid not in gl_data:
             log.d("Similarity calculation not found in cache")
             gl_data.update(self._calculate(gallery_or_id, all_gallery_tags).get())
-            with utils.intertnal_db() as idb:
-                idb[constants.internaldb.similar_gallery_calc.key] = gl_data
-                idb[constants.internaldb.similar_gallery_tags.key] = all_gallery_tags
+            idb = constants.internaldb
+            idb[constants.internaldb.similar_gallery_calc.key] = gl_data
+            idb[constants.internaldb.similar_gallery_tags.key] = all_gallery_tags
         self.next_progress()
         v = []
         if gid in gl_data:
-            v = [x for x in sorted(gl_data[gid], reverse=True, key=lambda x:gl_data[gid][x])]
+            v = [int(x) for x in sorted(gl_data[gid], reverse=True, key=lambda x:gl_data[gid][x])]
         return v
 
     def __init__(self):
@@ -79,53 +156,57 @@ class SimilarGallery(AsyncCommand):
 
     @async_utils.defer
     def _calculate(self, gallery_or_id, all_gallery_tags={}):
-        assert isinstance(gallery_or_id, (int, db.Gallery))
-        data = {}
-        g_id = gallery_or_id.id if isinstance(gallery_or_id, db.Gallery) else gallery_or_id
-        tag_count = 0
-        tag_count_minimum = 5
-        if g_id in all_gallery_tags:
-            g_tags = all_gallery_tags[g_id]
-            for a, b in g_tags.items():
-                tag_count += len(b)
-            self.set_max_progress(len(g_tags) + 3)
-        else:
-            if isinstance(gallery_or_id, db.Gallery):
-                g_tags = gallery_or_id
+        assert isinstance(gallery_or_id, (str, int, db.Gallery))
+        sess = constants.db_session()
+        with db.no_autoflush(sess):
+            data = {}
+            g_id = gallery_or_id.id if isinstance(gallery_or_id, db.Gallery) else gallery_or_id
+            g_id = str(g_id)  # because JSON keys are str
+            tag_count = 0
+            tag_count_minimum = 3
+            if g_id in all_gallery_tags:
+                g_tags = all_gallery_tags[g_id]
+                for a, b in g_tags.items():
+                    tag_count += len(b)
+                self.set_max_progress(len(g_tags) + 3)
             else:
-                g_tags = database_cmd.GetModelItems().run(db.Taggable, join=db.Gallery.taggable,
-                                                          filter=db.Gallery.id == g_id)
-                if g_tags:
-                    g_tags = g_tags[0]
-                tag_count = g_tags.tags.count()
-                if tag_count > tag_count_minimum:
-                    g_tags = g_tags.compact_tags(g_tags.tags.all())
-
-        self.next_progress()
-        if g_tags and tag_count > tag_count_minimum:
-            log.d("Calculating similarity")
-            g_tags = self._get_set(g_tags)
-            data[g_id] = gl_data = {}
-            update_dict = not all_gallery_tags
-            max_prog = 3
-            for t_id, t in all_gallery_tags.items() or constants.db_session().query(
-                    db.Gallery.id, db.Taggable).join(db.Gallery.taggable):
-                self.next_progress()
-                if update_dict:
-                    all_gallery_tags[t_id] = t.compact_tags(t.tags.all())
-                    max_prog += 1
-                    self.set_max_progress(max_prog)
-                if t_id == g_id:
-                    continue
-                t_tags = self._get_set(all_gallery_tags[t_id])
-                if (math.sqrt(len(g_tags)) * math.sqrt(len(t_tags))) != 0:
-                    cos = len(g_tags & t_tags) / (math.sqrt(len(g_tags))) * math.sqrt(len(t_tags))
+                if isinstance(gallery_or_id, db.Gallery):
+                    g_tags = gallery_or_id
                 else:
-                    cos = 0
-                if cos:
-                    gl_data[t_id] = cos
-            log.d("Finished calculating similarity")
-        self.next_progress()
+                    g_tags = database_cmd.GetModelItems().run(db.Taggable, join=db.Gallery.taggable,
+                                                              filter=db.Gallery.id == int(g_id))
+                    if g_tags:
+                        g_tags = g_tags[0]
+                    tag_count = g_tags.tags.count()
+                    if tag_count > tag_count_minimum:
+                        g_tags = g_tags.compact_tags(g_tags.tags.all())
+
+            self.next_progress()
+            if g_tags and tag_count > tag_count_minimum:
+                log.d("Calculating similarity")
+                g_tags = self._get_set(g_tags)
+                data[g_id] = gl_data = {}
+                update_dict = not all_gallery_tags
+                max_prog = 3
+                for t_id, t in all_gallery_tags.items() or constants.db_session().query(
+                        db.Gallery.id, db.Taggable).join(db.Gallery.taggable):
+                    t_id = str(t_id)
+                    self.next_progress()
+                    if update_dict:
+                        all_gallery_tags[t_id] = t.compact_tags(t.tags.all())
+                        max_prog += 1
+                        self.set_max_progress(max_prog)
+                    if t_id == g_id:
+                        continue
+                    t_tags = self._get_set(all_gallery_tags[t_id])
+                    if (math.sqrt(len(g_tags)) * math.sqrt(len(t_tags))) != 0:
+                        cos = len(g_tags & t_tags) / (math.sqrt(len(g_tags))) * math.sqrt(len(t_tags))
+                    else:
+                        cos = 0
+                    if cos:
+                        gl_data[t_id] = cos
+                log.d("Finished calculating similarity")
+            self.next_progress()
 
         return data
 

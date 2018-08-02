@@ -3,7 +3,6 @@ from src.react_utils import (h,
                              createReactClass,
                              Link)
 from src.ui import ui
-from src import utils
 from src.client import (ItemType, ImageSize)
 from src.single import thumbitem
 from org.transcrypt.stubs.browser import __pragma__
@@ -39,6 +38,8 @@ def collection_render():
     if this.props.className:
         cls_name += ' ' + this.props.className
 
+    collection_url = '/item/collection/' + str(item_id)
+
     link = True
     if not this.props.link == js_undefined:
         link = this.props.link
@@ -52,8 +53,7 @@ def collection_render():
               )
 
     if link:
-        thumb = e(Link, thumb, to={'pathname': '/item/collection',
-                                   'search': utils.query_to_string({'id': item_id}),
+        thumb = e(Link, thumb, to={'pathname': collection_url,
                                    'state': {'collection': data},
                                    })
 
@@ -70,6 +70,7 @@ def collection_render():
                            className="card-item bottom right above-dimmer",
                            inverted=True),
                  hoverable=True,
+                 hideOnScroll=True,
                  on="click",
                  position="right center",
                  ),
@@ -100,4 +101,4 @@ Collection = createReactClass({
     'componentDidUpdate': collection_on_update,
 
     'render': collection_render
-})
+}, pure=True)

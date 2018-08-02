@@ -7,7 +7,7 @@ from PyInstaller.utils.hooks import exec_statement
 sys.modules['FixTk'] = None
 
 working_dir = os.getcwd()
-icon_path = "deploy/osx/app.icns" if sys.platform.startswith('darwin') else "static/favicon.ico"
+icon_path = "deploy/osx/app.icns" if sys.platform.startswith('darwin') else "static/favicon/favicon.ico"
 version_path = "deploy/win/version.txt"
 
 block_cipher = None
@@ -33,13 +33,15 @@ added_files = [
     ('templates/base.html', 'templates'),
     ('translations', 'translations'),
     ('static', 'static'),
+    ('migrate', 'migrate'),
+    ('alembic.ini', '.'),
   ]
 
 interface_files = exec_statement("""
     from happypanda.common import utils
     from happypanda import interface
     print(" ".join(utils.get_package_modules(interface, False)))""").split()
-
+print(interface_files)
 if os.name == 'nt':
   added_files += [('deploy/win/vc_redist.x86.exe', '.')]
   interface_files.append("winreg")
@@ -54,7 +56,9 @@ def make(py_file, exe_name, analysis_kwargs={}, pyz_args=None, exe_kwargs={}):
 
   a_kwargs = dict(binaries=[],
                datas=added_files,
-               hiddenimports=['engineio.async_gevent', 'sqlalchemy.ext.baked']+interface_files,
+               hiddenimports=['engineio.async_gevent',
+                              'logging.config',
+                              'sqlalchemy.ext.baked']+interface_files,
                hookspath=[],
                runtime_hooks=[],
                excludes=['FixTk', 'tcl', 'tk', '_tkinter', 'tkinter', 'Tkinter'],

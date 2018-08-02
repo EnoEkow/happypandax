@@ -41,6 +41,9 @@ def get_image(item_type: enums.ItemType=enums.ItemType.Gallery,
                 item_id : command_id
             }
 
+    .. seealso::
+
+        :func:`.get_image_from_path`
     """
 
     item_type = enums.ItemType.get(item_type)
@@ -61,6 +64,66 @@ def get_image(item_type: enums.ItemType=enums.ItemType.Gallery,
 
     return message.Identity('image', content)
 
+# def delete_item(item_type: enums.ItemType=enums.ItemType.Gallery,
+#             item_id: int=0,
+#             options: dict={}):
+#    """
+#    Create a new item and add it to the database
+
+#    Args:
+#        item_type: type of item to create
+#        item_id: id of item
+
+#    Returns:
+#        []
+
+#    |async command|
+
+#    """
+
+#    item_type = enums.ItemType.get(item_type)
+#    db_msg, db_model = item_type._msg_and_model()
+
+#    item = database_cmd.GetModelItems().run(db_model, {item_id})[0]
+#    if not item:
+#        raise exceptions.DatabaseItemNotFoundError(utils.this_function(),
+#                                                   "'{}' with id '{}' was not found".format(item_type.name,
+#                                                                                            item_id))
+
+
+#    cmd_id = database_cmd.DeleteItem(services.AsyncService.generic).run(item, options=options)
+#    return message.Identity('command_id', cmd_id)
+
+def new_item(item_type: enums.ItemType=enums.ItemType.Gallery,
+             item: dict={},
+             options: dict={}):
+    """
+    Create a new item and add it to the database
+
+    Args:
+        item_type: type of item to create
+        item: item messeage object
+
+    Returns:
+        []
+
+    |async command|
+
+    """
+
+    if not item:
+        raise exceptions.APIError(utils.this_function(), "item must be a message object")
+    if item.get('id', False) and not constants.dev:
+        raise exceptions.APIError(utils.this_function(), "cannot create item with an id")
+
+    item_type = enums.ItemType.get(item_type)
+    db_msg, db_model = item_type._msg_and_model()
+
+    db_obj = db_msg.from_json(item)
+
+    cmd_id = database_cmd.AddItem(services.AsyncService.generic).run(db_obj, options=options)
+    return message.Identity('command_id', cmd_id)
+
 
 def get_item(item_type: enums.ItemType=enums.ItemType.Gallery,
              item_id: int=0):
@@ -74,7 +137,8 @@ def get_item(item_type: enums.ItemType=enums.ItemType.Gallery,
     Returns:
         item message object
     """
-
+    if not item_id:
+        raise exceptions.APIError(utils.this_function(), f"A valid item id is required, not {item_id}")
     item_type = enums.ItemType.get(item_type)
 
     db_msg, db_model = item_type._msg_and_model()
@@ -86,6 +150,27 @@ def get_item(item_type: enums.ItemType=enums.ItemType.Gallery,
                                                                                             item_id))
 
     return db_msg(item)
+
+# def new_items(item_type: enums.ItemType=enums.ItemType.Gallery,
+#             items: list={}):
+#    """
+#    Create new items and add them to the database
+
+#    Args:
+#        item_type: type of item to create
+#        item: item messeage object
+
+#    Returns:
+#        [
+#            {
+#                item_id : 0, # id of created item, will be 0 if item was not created
+#            },
+#            ...
+#        ]
+#    """
+
+#    item_type = enums.ItemType.get(item_type)
+#    raise NotImplementedError
 
 
 def get_items(item_type: enums.ItemType=enums.ItemType.Gallery,
@@ -314,3 +399,46 @@ def search_item(item_type: enums.ItemType=enums.ItemType.Gallery,
 #        related_type: child item
 #        item_id: id of parent item
 #    """
+
+def update_metatags(item_type: enums.ItemType=enums.ItemType.Gallery,
+                    item_id: int=0,
+                    metatags: dict={}):
+    """
+    Update metatags for an item
+
+    Args:
+        item_type: possible items are :py:attr:`.ItemType.Gallery`, :py:attr:`.ItemType.Page`,
+            :py:attr:`.ItemType.Artist`, :py:attr:`.ItemType.Collection`
+        item_id: id of item
+        metatag: a dict of ``{ metatag_name : bool }``
+
+    Returns:
+        bool indicating whether metatags were updated
+    """
+
+    item_type = enums.ItemType.get(item_type)
+
+    _, db_item = item_type._msg_and_model(
+        (enums.ItemType.Gallery, enums.ItemType.Collection, enums.ItemType.Page,
+         enums.ItemType.Artist))
+
+    t = database_cmd.GetModelItems().run(db_item, {item_id})
+    if not t:
+        raise exceptions.DatabaseItemNotFoundError(
+            utils.this_function(),
+            "{} with item id '{}' not found".format(
+                item_type,
+                item_id))
+    t = t[0]
+    mtags = {}
+    anames = db.MetaTag.all_names()
+    for m, v in metatags.items():
+        if m not in anames:
+            raise exceptions.APIError(utils.this_function(), f"Metatag name '{m}' does not exist")
+        mtags[m] = v
+
+    t.update("metatags", mtags)
+
+    db.object_session(t).commit()
+
+    return message.Identity('status', True)

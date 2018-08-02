@@ -1,7 +1,7 @@
 from src.react_utils import (e,
                              createReactClass,
                              Link)
-from src.ui import ui
+from src.ui import ui, TitleChange
 from src.i18n import tr
 from src.state import state
 from src.client import (ItemType, ImageSize, client, Command)
@@ -74,7 +74,7 @@ def get_thumbs(data=None, error=None, other=None):
                              item_type=this.state.item_type)
 
 
-def get_pages(data=None, error=None, gid=None):
+def get_pages(data=None, error=None, gid=None, limit=50):
     if data is not None and not error:
         pages = this.state.pages
         for p in data:
@@ -87,7 +87,6 @@ def get_pages(data=None, error=None, gid=None):
             gid = this.state.data.gallery_id
         page = this.state.page_list_page
         this.setState({'page_list_loading': True, "page_list_page": page + 1})
-        limit = 50
         client.call_func("get_related_items",
                          this.get_pages, item_type=ItemType.Gallery,
                          item_id=gid, limit=limit, offset=page * limit)
@@ -105,27 +104,25 @@ def get_item(ctx=None, data=None, error=None):
                 this.get_pages(gid=data.gallery_id)
         else:
             if not utils.get_query("retry"):
-                utils.go_to(this.props.history, query={"number": 1, "retry": True}, push=False)
+                utils.go_to(this.props.history, this.get_page_url(1), query={"retry": True}, push=False)
     elif error:
         state.app.notif("Failed to fetch item ({})".format(this.state.id), level="error")
     else:
-        gid = utils.get_query("gid")
-        pid = utils.get_query("id")
-
-        if this.state.data and utils.get_query("number") == this.state.data.number:
+        gid = int(this.props.match.params.gallery_id)
+        number = int(this.props.match.params.page_number)
+        client.log("Fetching page: " + number)
+        if this.state.data and number == this.state.data.number:
+            client.log("Current page data is the same")
             return
-
-        number = utils.get_query("number", 1)
 
         if this.state.pages:
             if number in this.state.pages:
+                client.log("Retrieving cached page")
                 this.setState({'data': this.state.pages[number]['data']})
                 return
+        client.log("Retrieving new page")
         if gid:
             client.call_func("get_page", this.get_item, gallery_id=gid, number=number, ctx=True)
-            this.setState({'loading': True})
-        elif pid:
-            client.call_func("get_page", this.get_item, page_id=pid, number=number, ctx=True)
             this.setState({'loading': True})
 
 
@@ -148,7 +145,37 @@ def get_page_count(data=None, error=None, gid=None):
                              related_type=this.state.item_type)
 
 
+def get_gallery(data=None, error=None):
+    if data is not None and not error:
+        this.setState({"gallery": data})
+    elif error:
+        state.app.notif("Failed to fetch gallery item ({})".format(this.state.id), level="error")
+    else:
+        if this.props.location.state and this.props.location.state.gallery:
+            this.get_gallery(this.props.location.state.gallery)
+            return
+        gid = int(this.props.match.params.gallery_id)
+        if gid:
+            client.call_func("get_item", this.get_gallery, item_type=ItemType.Gallery, item_id=gid)
+
+
+def get_page_url(number, gid=None):
+    return "/item/gallery/{}/page/{}".format(
+        this.props.match.params.gallery_id if gid is None else gid,
+        number)
+
+
 __pragma__("nokwargs")
+
+
+def go_next():
+    if int(this.state.data.number) < int(this.state.page_count):
+        utils.go_to(this.props.history, this.get_page_url(this.state.data.number + 1))
+
+
+def go_prev():
+    if int(this.state.data.number) > 1:
+        utils.go_to(this.props.history, this.get_page_url(this.state.data.number - 1))
 
 
 def go_left():
@@ -191,18 +218,14 @@ def on_canvas_click(ev):
 
 def on_update(p_props, p_state):
     if p_state.data != this.state.data:
-        query = {
-            'gid': this.state.data.gallery_id,
-            "number": this.state.data.number}
+        this.setState({'number': this.state.data.number})
+
+    if any((p_props.match.params.page_number != this.props.match.params.page_number,
+            )):
+        this.get_item()
         this.setState({'config_visible': False})
         if not this.state.cfg_pagelist_open:
             this.setState({'pages_visible': False})
-        utils.go_to(this.props.history, query=query, push=False)
-
-
-def receive_props(n_props):
-    if n_props.location != this.props.location:
-        this.get_item()
         scroll_top = this.props.scroll_top if utils.defined(this.props.scroll_top) else True
         if scroll_top:
             el = this.props.context or this.state.context or state.container_ref
@@ -225,21 +248,25 @@ __pragma__("jsiter")
 
 
 def page_render():
-    number = 0
-    p_id = this.state.id
+    number = this.state.number
+    p_id = 0
     hash_id = ""
     path = ""
     fav = 0
-    gid = this.state.gid
     all_pages = this.state.pages
     if this.state.data:
-        gid = this.state.data.gallery_id
         p_id = this.state.data.id
         number = this.state.data.number
         hash_id = this.state.data.hash
         path = this.state.data.path
         if this.state.data.metatags.favorite:
             fav = 1
+
+    page_title = "",
+    if this.state.gallery:
+        if this.state.gallery.preferred_title:
+            t = this.state.gallery.preferred_title.js_name
+            page_title = "{} {} | {}".format(tr(this, "ui.t-page", "Page"), number, t)
 
     img = None
     __pragma__("iconv")
@@ -249,8 +276,8 @@ def page_render():
 
     n_url = ""
     if int(number) < int(this.state.page_count):
-        n_url = utils.build_url(query={'gid': gid, "number": int(number) + 1})
-    p_url = utils.build_url(query={'gid': gid, "number": int(number) - 1})
+        n_url = this.get_page_url(int(number) + 1)
+    p_url = this.get_page_url(int(number) - 1)
 
     thumb_style = {}
     thumb_class = ''
@@ -307,8 +334,8 @@ def page_render():
         {'key': 3, 'text': tr(this, "", 'Fit Height'), 'value': ReaderScaling.fit_height},
     ]
 
-    set_page = this.set_page
     return e(ui.Sidebar.Pushable,
+             e(TitleChange, title=page_title),
              e(ui.Ref,
                e(ui.Sidebar,
                  e(itemview.SimpleView,
@@ -316,8 +343,6 @@ def page_render():
                      *[e(pageitem.Page,
                          data=all_pages[x]['data'],
                          centered=True,
-                         link=False,
-                         onClick=set_page,
                          ) for x in all_pages],
                      itemsPerRow=2,
                      ),
@@ -399,8 +424,11 @@ def page_render():
 Page = createReactClass({
     'displayName': 'Page',
 
-    'getInitialState': lambda: {'id': int(utils.get_query("id", 0)),
-                                'gid': int(utils.get_query("gid", 0)),
+    'get_page_url': get_page_url,
+
+    'getInitialState': lambda: {'gid': int(this.props.match.params.gallery_id),
+                                'number': int(this.props.match.params.page_number),
+                                'gallery': None,
                                 'pages': {},
                                 'page_list_ref': None,
                                 'page_list_page': 0,
@@ -422,21 +450,20 @@ Page = createReactClass({
 
     'cmd_data': None,
     'set_page': lambda e, d: this.setState({'data': d}),
-    'go_prev': lambda: utils.go_to(this.props.history, query={'gid': this.state.data.gallery_id, 'number': this.state.data.number - 1}) if
-    int(this.state.data.number) > 1 else None,
-    'go_next': lambda: utils.go_to(this.props.history, query={'gid': this.state.data.gallery_id, 'number': this.state.data.number + 1}) if
-    int(this.state.data.number) < int(this.state.page_count) else None,
+    'go_prev': go_prev,
+    'go_next': go_next,
     'go_left': go_left,
     'go_right': go_right,
     'set_pagelist_ref': lambda r: this.setState({'page_list_ref': r}),
     'set_thumbs': set_thumbs,
     'get_thumbs': get_thumbs,
     'get_item': get_item,
+    'get_gallery': get_gallery,
     'get_pages': get_pages,
     'get_page_count': get_page_count,
     'on_key': on_key,
     'on_pagelist_load_more': lambda: this.get_pages(),
-    'back_to_gallery': lambda: utils.go_to(this.props.history, "/item/gallery", query={'id': utils.get_query("gid") or this.state.data.gallery_id}, keep_query=False),
+    'back_to_gallery': lambda: utils.go_to(this.props.history, "/item/gallery/{}".format(this.props.match.params.gallery_id), keep_query=False),
 
     'set_cfg_direction': lambda e, d: all((this.setState({'cfg_direction': d.value}), utils.storage.set("reader_direction", d.value))),
     'set_cfg_scaling': lambda e, d: all((this.setState({'cfg_scaling': d.value}), utils.storage.set("reader_scaling", d.value))),
@@ -450,21 +477,24 @@ Page = createReactClass({
     'on_canvas_click': on_canvas_click,
 
     'componentDidUpdate': on_update,
-    'componentWillReceiveProps': receive_props,
-    'componentDidMount': lambda: window.addEventListener("keydown", this.on_key, False),
-    'componentWillUnmount': lambda: window.removeEventListener("keydown", this.on_key, False),
+    'componentDidMount': lambda: all((window.addEventListener("keydown", this.on_key, False), this.get_gallery())),
+    'componentWillUnmount': lambda: all((window.removeEventListener("keydown", this.on_key, False),
+                                         state.update({'reset_scroll': True})
+                                         )),
 
     'componentWillMount': lambda: all((this.props.menu([
-        e(ui.Menu.Item, e(ui.Icon, js_name="list layout", size="large"),
+        e(ui.Menu.Item, e(ui.Icon, js_name="ellipsis vertical", size="large"),
           icon=True, onClick=this.toggle_pages, position="left"),
-        e(ui.Menu.Menu, e(ui.Menu.Item, e(ui.Icon, js_name="arrow up", size="large"), icon=True, onClick=this.back_to_gallery)),
+        e(ui.Menu.Menu, e(ui.Menu.Item, e(ui.Icon, js_name="arrow up", size="large"), icon=True, as_=Link, to={'pathname': "/item/gallery/{}".format(this.props.match.params.gallery_id),
+                                                                                                               'state': {'gallery': this.state.gallery}})),
         e(ui.Menu.Item, e(ui.Icon, js_name="options", size="large"),
           icon=True, onClick=this.toggle_config, position="right"),
     ]),
         (this.get_item() if not this.state.data else None),
+        state.update({'reset_scroll': False})
     )),
 
     'render': page_render
-})
+}, pure=True)
 __pragma__("notconv")
 __pragma__("nojsiter")

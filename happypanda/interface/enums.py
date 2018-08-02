@@ -61,16 +61,23 @@ class _APIEnum(enum.Enum):
 
 
 class ViewType(_APIEnum):
-    #: Library
+    #: Contains all items except items in Trash
+    All = 6
+    #: Contains all items except items in Inbox and Trash
     Library = 1
-    #: Favourite
+    #: Contains all favourite items (mutually exclusive with items in Inbox)
     Favorite = 2
-    #: Inbox
+    #: Contains only items in Inbox
     Inbox = 3
-    #: Trash
+    #: Contains only items in Trash
     Trash = 4
-    #: Read Later
+    #: Contains only items in ReadLater
     ReadLater = 5
+
+
+class TemporaryViewType(_APIEnum):
+    #: Contains gallery items to be added
+    GalleryAddition = 1
 
 
 class ItemType(_APIEnum):
@@ -223,6 +230,12 @@ class ProgressType(_APIEnum):
     CheckUpdate = 3
     #: Updating application
     UpdateApplication = 4
+    #: Scanning for galleries
+    GalleryScan = 5
+    #: Adding items to the database
+    ItemAdd = 6
+    #: Removing items from the database
+    ItemRemove = 7
 
 
 class PluginState(_APIEnum):

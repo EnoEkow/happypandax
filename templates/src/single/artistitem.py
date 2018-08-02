@@ -21,8 +21,9 @@ def artistlbl_render():
     if data:
         if data.preferred_name:
             name = data.preferred_name.js_name
-        if data.metatags.favorite:
-            fav = 1
+        if data.metatags:
+            if data.metatags.favorite:
+                fav = 1
 
     lbl_args = {'content': name}
     if fav:
@@ -38,6 +39,7 @@ def artistlbl_render():
                        **lbl_args,
                        ),
              hoverable=True,
+             hideOnScroll=True,
              wide="very",
              on="click",
              position="top center"
@@ -61,4 +63,4 @@ ArtistLabel = createReactClass({
     'componentDidMount': lambda: this.get_tags() if not utils.defined(this.props.tags) else None,
 
     'render': artistlbl_render
-})
+}, pure=True)

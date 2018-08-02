@@ -28,7 +28,7 @@ def add_translation(ctx, data, err):
 
 def add_translation_component(ctx, data, err):
     add_translation(ctx, data, err)
-    if not err and ctx['cmp']:
+    if not err and ctx['cmp'] and ctx['cmp'].mounted:
         ctx['cmp'].forceUpdate()
 
 
@@ -40,6 +40,11 @@ __pragma__("iconv")
 def tr(that, t_id, default_txt, placeholder=None, count=None):
     if state.untranslated_text:
         default_txt = "<UT>" + default_txt + "</UT>"
+    if placeholder is None and count is None and state.translations is None:
+        return default_txt
+    elif placeholder is None and count is None and state.translations is not None:
+        if state.translations[t_id]:
+            return state.translations[t_id]
     t_txt = None
     curr_locale = utils.storage.get("locale", "unknown")
     ctx = {'t_id': t_id,

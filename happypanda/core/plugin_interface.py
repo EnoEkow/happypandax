@@ -2,7 +2,7 @@
 Interface
 ----------------------------------------
 
-The plugin interface module named ``__hpx__``.
+The plugin interface module is named ``__hpx__``.
 Import it in your plugin to access the methods and classes defined by the module::
 
     import __hpx__ as hpx
@@ -55,6 +55,7 @@ The object ``constants`` is available on the module-level and provides various u
 import typing
 import functools
 
+database = None
 command = None
 constants = None
 

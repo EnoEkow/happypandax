@@ -8,14 +8,15 @@ from src.react_utils import (h,
                              Router,
                              Route,
                              Redirect,
+                             withRouter,
                              )
 from src.ui import ui, Alert, Notif, TitleChange
 from src.nav import (sidebar, menu)
 from src.i18n import tr
 from src.pages import (api, collection, gallery,
-                       dashboard, favorites, inbox,
-                       library, page, directory,
-                       activity, login)
+                       dashboard, favorites, library,
+                       page, directory,
+                       activity, login, manage)
 from src.client import pushclient, PushID
 from src import utils
 from org.transcrypt.stubs.browser import __pragma__
@@ -32,47 +33,16 @@ __pragma__('noskip')
 __pragma__('alias', 'as_', 'as')
 require('smoothscroll-polyfill').polyfill()
 
-preview_txt = """Hi there!
-
-This is a [preview] of what HPX is capable of.
-Though, it is not a complete preview because I plan to keep adding more features over time.
-This [preview] is intended for users migrating from good old Happypanda.
-Why is that?
-Well, because you won't be able to use HPX without a database from Happypanda.
-HPX [preview] also means that it's not possible to write anything to the HPX database yet.
-There is no "Add gallery..." function yet. I have not implemented it.
-To use HPX you need to convert your database from Happypanda to a HPX database.
-You can do that with the GUI (named 'happypandax_gui'), click the button named "HP to HPX".
-
-I'd advise against deleting your Happypanda database. You will likely need to convert again in the future.
-So, if you wish to add new galleries, a proposed way is:
-Add galleries in Happypanda -> Convert database -> New galleries are in HPX
-
-HPX has an auto update feature. When a new release comes out just click [Update] on the pop-up notification and it'll update and restart for you automatically!
-(Provided you're not running from source).
-HPX should gradually become much better than Happypanda. Now you can fa- I mean indulge your stuff from anywhere once you have it set up!
-
-I have poured many hours into HPX and will likely continue to do so in the forseeable future!
-I want to thank everyone who have contributed to HPX and HP in some way or another.
-I want to especially thank you guys who went ahead and donated to me.
-I did not actually expect anyone to do that so I am very happy, and most importantly, it motivated me a ton!
-And so... because of that, I went ahead and made a Patreon. The Patreon will be for HPX and my art.
-If you think that Happypanda has served you well and want to see HPX become better faster, please consider supporting me on there.
-It'll motivate me a ton! :)
-
-Once again, thank you guys who donated to me through Ko-Fi.
-
-I hope you'll like HPX.
-"""
-
 
 def on_update(props):
     if props.location.pathname != this.props.location.pathname:
         for x in state.commands:
-            x.stop()
+            if x.daemon:
+                x.stop()
         # HACK: blocks scroll restoration
         # TODO: scroll restoration
-        window.scrollTo(0, 0)
+        if state.reset_scroll:
+            window.scrollTo(0, 0)
 
 
 def on_path_mount():
@@ -87,7 +57,7 @@ PathChange = createReactClass({
     'componentDidMount': on_path_mount,
 
     'render': lambda: None
-})
+}, pure=True)
 
 __pragma__("kwargs")
 
@@ -182,7 +152,6 @@ def app_will_mount():
 
 
 def app_did_mount():
-    tr(None, "ui.t-changelog-location", "")
     utils.interval_func(this.server_notifications, 5000)
     document.body.appendChild(this.state.portal_el)
 
@@ -210,11 +179,13 @@ def app_render():
 
     if this.state.logged_in:
         sidebar_args = {
+            'location': this.props.location,
             'toggler': this.toggle_sidebar,
-            'toggled': this.state["sidebar_toggled"]
+            'toggled': this.state["sidebar_toggled"],
         }
 
         menu_args = {
+            'location': this.props.location,
             'toggler': this.toggle_sidebar,
             'contents': this.state["menu_nav_contents"],
             'menu_args': this.state["menu_nav_args"]
@@ -251,29 +222,18 @@ def app_render():
                            open=this.state.server_push, dimmer="inverted", closeIcon=True)
                          )
 
-        modal_els.append(e(ui.Modal,
-                           e(ui.Modal.Header, "Welcome to HappyPanda X Preview!"),
-                           e(ui.Modal.Content, preview_txt, style={"white-space": "pre-wrap"}),
-                           e(ui.Modal.Actions, e(ui.Button, e(ui.Icon, js_name="heart"), "Show your support on patreon!",
-                                                 href="https://www.patreon.com/twiddly", target="_blank", color="orange")),
-                           closeIcon=True,
-                           open=utils.storage.get("preview_msg", this.state.preview_msg),
-                           onClose=this.close_preview_msg)
-                         )
-
         api_route = []
         if this.state.debug:
             api_route.append(e(Route, path="/api", component=this.api_page))
 
-        el = e(Router,
-               h("div",
-                 e(ui.Responsive,
+        el = h("div",
+               e(ui.Responsive,
                    #e(ConnectStatus, context=this.state.root_ref),
                    e(sidebar.SideBar, **sidebar_args), minWidth=767),
-                 e(ui.Responsive,
+               e(ui.Responsive,
                    e(sidebar.SideBar, mobile=True, **sidebar_args), maxWidth=768),
-                 e(Route, component=PathChange),
-                 e(ui.Ref,
+               e(Route, component=PathChange),
+               e(ui.Ref,
                    e(ui.Sidebar.Pusher,
                      e(ui.Visibility,
                        e(ui.Responsive,
@@ -285,15 +245,15 @@ def app_render():
                        ),
                      e(Switch,
                        *api_route,
+                       e(Route, path="/manage", component=this.manage_page),
                        e(Route, path="/dashboard", component=this.dashboard_page),
                        e(Route, path="/library", component=this.library_page),
                        e(Route, path="/favorite", component=this.favorites_page),
-                       e(Route, path="/inbox", component=this.inbox_page),
                        e(Route, path="/directory", component=this.directory_page),
                        e(Route, path="/activity", component=this.activity_page),
-                       e(Route, path="/item/gallery", component=this.gallery_page),
-                       e(Route, path="/item/collection", component=this.collection_page),
-                       e(Route, path="/item/page", component=this.page_page),
+                       e(Route, path="/item/gallery/:gallery_id(\d+)/page/:page_number(\d+)", component=this.page_page),
+                       e(Route, path="/item/gallery/:item_id(\d+)", component=this.gallery_page),
+                       e(Route, path="/item/collection/:item_id(\d+)", component=this.collection_page),
                        e(Redirect, js_from="/", exact=True, to={'pathname': "/library"}),
                        ),
                      # e(ui.Sticky,
@@ -309,10 +269,9 @@ def app_render():
                      className="min-fullheight",
                      ),
                    innerRef=this.get_context_ref,
-                   ),
                  ),
                key="1",
-               )
+               ),
     elif not utils.defined(this.state.logged_in):
         el = e(ui.Segment,
                e(ui.Dimmer,
@@ -379,12 +338,12 @@ App = createReactClass({
     'dashboard_page': lambda p: e(dashboard.Page, menu=this.set_menu_contents, **p),
     'library_page': lambda p: e(library.Page, menu=this.set_menu_contents, **p),
     'favorites_page': lambda p: e(favorites.Page, menu=this.set_menu_contents, **p),
-    'inbox_page': lambda p: e(inbox.Page, menu=this.set_menu_contents, **p),
     'page_page': lambda p: e(page.Page, menu=this.set_menu_contents, **p),
     'gallery_page': lambda p: e(gallery.Page, menu=this.set_menu_contents, **p),
     'collection_page': lambda p: e(collection.Page, menu=this.set_menu_contents, **p),
     'directory_page': lambda p: e(directory.Page, menu=this.set_menu_contents, **p),
     'activity_page': lambda p: e(activity.Page, menu=this.set_menu_contents, **p),
+    'manage_page': lambda p: e(manage.Page, menu=this.set_menu_contents, **p),
 
     'render': app_render,
 })
@@ -402,4 +361,4 @@ def visibility_change():
 # todo: check support
 document.addEventListener(vkeys['visibilitychange'], visibility_change, False)
 
-render(e(App), 'root')
+render(e(Router, e(withRouter(App))), 'root')

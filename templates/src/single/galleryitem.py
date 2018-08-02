@@ -2,10 +2,11 @@ from src.react_utils import (h,
                              e,
                              createReactClass,
                              Link)
+from src import utils
+from src.state import state
 from src.ui import ui
 from src.client import (ItemType, ImageSize, client)
 from src.single import thumbitem
-from src import utils
 from src.propsviews import gallerypropsview
 from src.i18n import tr
 from org.transcrypt.stubs.browser import __pragma__
@@ -37,7 +38,39 @@ def open_external(e, d):
         client.call_func("open_gallery", None, item_id=this.state.data.id, item_type=this.state.item_type)
 
 
+def read_event(e, d):
+    if this.state.data:
+        client.call_func("gallery_read_event", None, item_id=this.state.data.id)
+
+
+def update_metatags(mtags):
+    if this.state.data:
+        client.call_func("update_metatags", None, item_type=ItemType.Gallery,
+                         item_id=this.state.data.id, metatags=mtags)
+        d = utils.JSONCopy(this.state.data)
+        d.metatags = dict(d.metatags)
+        d.metatags.update(mtags)
+        this.setState({'data': d})
+
+
 __pragma__("notconv")
+
+
+def get_item(data=None, error=None):
+    if not this.mounted:
+        return
+    if data is not None and not error:
+        this.setState({"data": data,
+                       "id": data.id,
+                       })
+
+    elif error:
+        state.app.notif("Failed to fetch item ({})".format(this.state.id), level="error")
+    else:
+        item_id = this.state.id
+        item = this.state.item_type
+        if item and item_id:
+            client.call_func("get_item", this.get_item, item_type=item, item_id=item_id)
 
 
 def gallery_render():
@@ -48,24 +81,31 @@ def gallery_render():
     artist_names = []
     item_id = this.state.id
     inbox = False
-    data = this.props.data or this.state.data
+    data = this.state.data
 
-    if this.state.data:
-        rating = this.state.data.rating
-        title = this.state.data.titles[0].js_name
-        inbox = this.state.data.metatags.inbox
+    if data:
+        if data.rating:
+            rating = data.rating
+        if data.preferred_title:
+            title = data.preferred_title.js_name
+        if data.metatags:
+            inbox = data.metatags.inbox
 
-        if this.state.data.metatags.favorite:
-            fav = 1
-        if not item_id:
-            item_id = this.state.data.id
+            if data.metatags.favorite:
+                fav = 1
+        if not item_id and data.id:
+            item_id = data.id
 
-        for a in this.state.data.artists:
-            if len(a.names) > 0:
-                artist_names.append(a.names[0].js_name)
+        if data.artists:
+            for a in data.artists:
+                if len(a.names) > 0:
+                    artist_names.append(a.names[0].js_name)
 
-        for u in this.state.data.urls:
-            urls.append(u.js_name)
+        if data.urls:
+            for u in data.urls:
+                urls.append(u.js_name)
+
+    gallery_url = '/item/gallery/' + str(item_id)
 
     add_cls = this.props.className or ""
     link = True
@@ -73,11 +113,10 @@ def gallery_render():
         link = this.props.link
 
     read_button_args = {}
-    if this.props.external_viewer:
-        read_button_args['onClick'] = this.open_external
-    else:
+    read_button_args['onClick'] = this.on_read
+    if not this.props.external_viewer:
         read_button_args['as'] = Link
-        read_button_args['to'] = utils.build_url("/item/page", {'gid': item_id}, keep_query=False)
+        read_button_args['to'] = "/item/gallery/{}/page/1".format(item_id)
 
     thumb = e(thumbitem.Thumbnail,
               item_id=item_id,
@@ -90,38 +129,47 @@ def gallery_render():
                        active=this.state.dimmer,
                        content=e(ui.Responsive,
                                  e(ui.List,
-                                   e(ui.List.Item, e(ui.Button, tr(this, "ui.b-read", "Read"),
+                                   e(ui.List.Item, e(ui.Button, e(ui.Icon, js_name="envelope open outline"), tr(this, "ui.b-read", "Read"),
                                                      primary=True, size="tiny", **read_button_args)),
                                    e(ui.List.Item, e(ui.Button, e(ui.Icon, js_name="bookmark outline"), tr(this, "ui.b-save-later", "Save for later"), size="tiny") if not inbox else
-                                     e(ui.Button, e(ui.Icon, js_name="grid layout"), tr(this, "ui.b-send-library", "Send to library"), color="green", size="tiny")),
+                                     e(ui.Button, e(ui.Icon, js_name="grid layout"), tr(this, "ui.b-send-library", "Send to library"), onClick=this.send_to_library, color="green", size="tiny")),
                                    ),
-                                 minWidth=1000,
+                                 minWidth=900,
                                  ),
                        inverted=True),
               )
     if link:
-        thumb = e(Link, thumb, to={'pathname': '/item/gallery',
-                                   'search': utils.query_to_string({'id': item_id}),
+        thumb = e(Link, thumb, to={'pathname': gallery_url,
                                    'state': {'gallery': data},
                                    })
 
     menu_options = []
-    menu_options.append(e(ui.List.Item, content=tr(this, "ui.b-read", "Read"), **read_button_args))
-    menu_options.append(e(ui.List.Item, content=tr(this, "ui.b-save-later", "Save for later"), icon="bookmark outline"))
+    menu_options.append(e(ui.List.Item, content=tr(this, "ui.b-read", "Read"),
+                          icon="envelope open outline", **read_button_args))
+    menu_options.append(e(ui.List.Item, content=tr(this, "ui.b-save-later", "Save for later"),
+                          icon="bookmark outline", onClick=this.read_later))
     if inbox:
         menu_options.append(e(ui.List.Item, content=tr(
-            this, "ui.b-send-library", "Send to library"), icon="grid layout"))
+            this, "ui.b-send-library", "Send to library"), onClick=this.send_to_library, icon="grid layout"))
     menu_options.append(e(ui.List.Item, content=tr(this, "ui.b-add-to-filter", "Add to filter"), icon="filter"))
     menu_options.append(e(ui.List.Item, content=tr(this, "ui.b-add-to-collection",
                                                    "Add to collection"), icon="plus square outline"))
     menu_options.append(e(ui.List.Item, content=tr(this, "ui.b-add-to-series", "Add to series"), icon="add square"))
-    menu_options.append(e(ui.List.Item, content=tr(this, "ui.b-send-trash", "Send to Trash"), icon="trash"))
+    menu_options.append(e(ui.List.Item, content=tr(this, "ui.b-send-trash", "Send to Trash"),
+                          icon="trash", onClick=this.send_to_trash))
 
     return e(ui.Card,
              e(ui.Dimmer.Dimmable,
                  h("div",
                    thumb,
-                   e(ui.Rating, icon="heart", size="massive", className="card-item top left above-dimmer", rating=fav),
+                   e(ui.Rating, icon="heart", onRate=this.favorite, size="massive",
+                     className="card-item top left above-dimmer", rating=fav),
+                   *([e(ui.Icon,
+                        js_name="inbox",
+                        title=tr(this, "ui.t-inboxed-gallery", "This gallery is in your inbox"),
+                        bordered=True,
+                        inverted=True,
+                        className="card-item top right above-dimmer")] if inbox else []),
                    e(ui.Popup,
                      e(ui.Rating, icon="star", defaultRating=rating, maxRating=10, clearable=True, className=""),
                      trigger=e(
@@ -155,22 +203,25 @@ def gallery_render():
                  onMouseEnter=this.dimmer_show,
                  onMouseLeave=this.dimmer_hide,
                ),
-             e(ui.Popup,
+             e(ui.Modal,
+               e(ui.Modal.Content,
+                 e(gallerypropsview.GalleryProps,
+                   compact=True,
+                   data=data,
+                   rating=rating,
+                   tags=this.state.tags,
+                   on_tags=this.on_tags,
+                   size="small"),
+                 ),
                trigger=e(ui.Card.Content,
                          e(ui.Card.Header, title, className="text-ellipsis card-header"),
                          e(ui.Card.Meta, *[h("span", x) for x in artist_names], className="text-ellipsis"),
                          ),
-               content=e(gallerypropsview.GalleryProps,
-                         compact=True,
-                         data=data,
-                         rating=rating,
-                         tags=this.state.tags,
-                         on_tags=this.on_tags,
-                         size="small"),
-               hoverable=True,
-               position="bottom center",
-               wide="very",
-               on="click",
+               # dimmer="inverted",
+               size="small",
+               closeOnDocumentClick=True,
+               closeIcon=True,
+               centered=False,
                ),
              centered=this.props.centered,
              className=add_cls,
@@ -181,7 +232,7 @@ def gallery_render():
 Gallery = createReactClass({
     'displayName': 'Gallery',
 
-    'getInitialState': lambda: {'id': None,
+    'getInitialState': lambda: {'id': this.props.data.id if this.props.data else None,
                                 'data': this.props.data,
                                 'item_type': ItemType.Gallery,
                                 'tags': this.props.tags,
@@ -189,7 +240,29 @@ Gallery = createReactClass({
                                 },
     'open_external': open_external,
 
+    'read_event': read_event,
+
+    'on_read': lambda e, d: all((this.read_event(e, d), this.open_external(e, d) if this.props.external_viewer else None)),
+
     'on_tags': on_tags,
+    'update_metatags': update_metatags,
+    'get_item': get_item,
+
+    'favorite': lambda e, d: all((this.update_metatags({'favorite': bool(d.rating)}),
+                                  this.get_item(),
+                                  e.preventDefault())),
+    'send_to_library': lambda e, d: all((this.update_metatags({'inbox': False}),
+                                         this.props.remove_item(
+        this.props.data or this.state.data) if this.props.remove_item else None,
+        e.preventDefault())),
+    'send_to_trash': lambda e, d: all((this.update_metatags({'trash': True}),
+                                       this.props.remove_item(
+        this.props.data or this.state.data) if this.props.remove_item else None,
+        e.preventDefault())),
+    'restore_from_trash': lambda e, d: all((this.update_metatags({'trash': False}),
+                                            e.preventDefault())),
+    'read_later': lambda e, d: all((this.update_metatags({'readlater': True}),
+                                    e.preventDefault())),
 
     'dimmer_show': lambda: this.setState({'dimmer': True}),
     'dimmer_hide': lambda: this.setState({'dimmer': False}),
@@ -198,4 +271,4 @@ Gallery = createReactClass({
     'componentDidUpdate': gallery_on_update,
 
     'render': gallery_render
-})
+}, pure=True)

@@ -13,7 +13,6 @@ import gevent
 import platform
 import threading
 import i18n
-import shelve
 import rollbar
 import importlib
 import atexit
@@ -23,8 +22,9 @@ import logging
 import regex
 import OpenSSL
 import errno
+import collections
+import langcodes
 
-from dbm import dumb as dumbdb
 from inspect import ismodule, currentframe, getframeinfo
 from contextlib import contextmanager
 from collections import namedtuple
@@ -72,25 +72,26 @@ def setup_dirs():
                 os.makedirs(dir_x)
 
 
-def disable_loggers(logs):
+def enable_loggers(logs):
     assert isinstance(logs, list)
     log_level = logging.WARNING
-    for l in logs:
-        if isinstance(l, str):
-            hlogger.Logger(l).setLevel(log_level)
-            lx = l + '.'
-            if lx == constants.log_ns_core:
-                hlogger.Logger("apscheduler").setLevel(log_level)
-                hlogger.Logger("PIL").setLevel(log_level)
-            elif lx == constants.log_ns_database:
-                hlogger.Logger("sqlalchemy").setLevel(log_level)
-                hlogger.Logger("sqlalchemy.pool").setLevel(log_level)
-                hlogger.Logger("sqlalchemy.engine").setLevel(log_level)
-                hlogger.Logger("sqlalchemy.orm").setLevel(log_level)
-            elif lx == constants.log_ns_client:
-                hlogger.Logger("geventwebsocket").setLevel(log_level)
-            elif lx == constants.log_ns_network:
-                hlogger.Logger("cachecontrol").setLevel(log_level)
+    if logs:
+        for l in constants.log_namespaces:
+            if l not in logs:
+                hlogger.Logger(l).setLevel(log_level)
+                if l in constants.log_ns_core:
+                    hlogger.Logger("apscheduler").setLevel(log_level)
+                    hlogger.Logger("PIL").setLevel(log_level)
+                elif l in constants.log_ns_database:
+                    hlogger.Logger("sqlalchemy").setLevel(log_level)
+                    hlogger.Logger("sqlalchemy.pool").setLevel(log_level)
+                    hlogger.Logger("sqlalchemy.engine").setLevel(log_level)
+                    hlogger.Logger("sqlalchemy.orm").setLevel(log_level)
+                    hlogger.Logger("alembic").setLevel(log_level)
+                elif l in constants.log_ns_client:
+                    hlogger.Logger("geventwebsocket").setLevel(log_level)
+                elif l in constants.log_ns_network:
+                    hlogger.Logger("cachecontrol").setLevel(log_level)
 
 
 def get_argparser():
@@ -163,14 +164,15 @@ def parse_options(args):
     assert isinstance(args, argparse.Namespace)
 
     constants.dev = args.dev
-    constants.dev_db = args.dev_db
 
     cfg = config.config
 
     cmd_args = {}
-
-    if args.debug is not None:
+    if args.debug:
         cmd_args.setdefault(config.debug.namespace, {})[config.debug.name] = args.debug
+
+    if args.dev_db:
+        cmd_args.setdefault(config.dev_db.namespace, {})[config.dev_db.name] = args.dev_db
 
     if args.host is not None:
         cmd_args.setdefault(config.host.namespace, {})[config.host.name] = args.host
@@ -189,6 +191,8 @@ def parse_options(args):
 
     if cmd_args:
         cfg.apply_commandline_args(cmd_args)
+
+    constants.dev_db = config.dev_db.value
 
     if constants.dev:
         sys.displayhook == pprint.pprint
@@ -222,16 +226,8 @@ def get_package_modules(pkg, load=True):
     mods = [m[1] for m in pkgutil.iter_modules(pkg.__path__, prefix)]
 
     # special handling for PyInstaller
-    importers = map(pkgutil.get_importer, pkg.__path__)
-    toc = set()
-    for i in importers:
-        #log.d("importer:", i)
-        if hasattr(i, 'toc'):
-            #log.d("toc:", i.toc)
-            toc |= i.toc
-    for elm in toc:
-        if elm.startswith(prefix):
-            mods.append(elm)
+    if hasattr(pkg, '__loader__') and hasattr(pkg.__loader__, 'toc'):
+        [mods.append(x) for x in pkg.__loader__.toc if x.startswith(prefix)]
 
     return [importlib.import_module(x) for x in mods] if load else mods
 
@@ -381,7 +377,6 @@ def os_info():
 
 def setup_online_reporter():
     """
-
     WARNING:
         execute AFTER setting up a logger!
         the rollbar lib somehow messes it up!
@@ -398,23 +393,6 @@ def setup_online_reporter():
                      allow_logging_basic_config=False,
                      suppress_reinit_warning=True)
         hlogger.Logger.report_online = True
-
-
-@contextmanager
-def intertnal_db():
-    log.d("Opening internal db")
-    if not os.path.exists(constants.dir_data):
-        setup_dirs()
-
-    try:
-        db = shelve.Shelf(dumbdb.open(constants.internal_db_path))
-    except BaseException:
-        log.e("Failed to open internal db")
-        raise
-    try:
-        yield db
-    finally:
-        db.close()
 
 
 def restart_process():
@@ -599,6 +577,24 @@ def indent_text(txt, num=4):
     return "\n".join((num * " ") + i for i in txt)
 
 
+def remove_multiple_spaces(txt):
+    """
+    Also removes whitespace characters (tab, newline, etc.)
+    """
+    return " ".join(txt.split())
+
+
+def regex_first_group(rgx):
+    """
+    """
+    r = []
+    for x in rgx:
+        if isinstance(x, tuple):
+            x = x[0]
+        r.append(x)
+    return tuple(r)
+
+
 def get_language_code(lcode):
     assert isinstance(lcode, str)
     if '_' in lcode:
@@ -629,9 +625,13 @@ def create_ssl_context(webserver=False, server_side=False, verify_mode=ssl.CERT_
         certfile = os.path.join(constants.dir_certs, "happypandax.crt")
         keyfile = os.path.join(constants.dir_certs, "happypandax.key")
         pemfile = os.path.join(constants.dir_certs, "happypandax.pem")
+        pfxfile = os.path.join(constants.dir_certs, "happypandax.pfx")
         if not os.path.exists(certfile):
-            create_self_signed_cert(certfile, keyfile, pemfile)
-        log.i("Certs not provided, using self-signed certificate", stdout=True)
+            create_self_signed_cert(certfile, keyfile, pemfile, pfxfile)
+        if not os.path.exists(pfxfile):
+            export_cert_to_pfx(pfxfile, certfile, keyfile)
+        if server_side and not webserver:
+            log.i("Certs not provided, using self-signed certificate", stdout=True)
     else:
         if not os.path.exists(certfile) and not (os.path.exists(keyfile) if keyfile else False):
             raise exceptions.CoreError(this_function(), "Non-existent certificate or private key file")
@@ -652,7 +652,7 @@ def create_ssl_context(webserver=False, server_side=False, verify_mode=ssl.CERT_
     return c
 
 
-def create_self_signed_cert(cert_file, key_file, pem_file=None):
+def create_self_signed_cert(cert_file, key_file, pem_file=None, pfx_file=None):
     """
     self-signed cert
     """
@@ -680,7 +680,7 @@ def create_self_signed_cert(cert_file, key_file, pem_file=None):
                 "DNS:happypanda.local",
                 "DNS:happypandax.local",
                 "IP:127.0.0.1",
-                "IP:::1", # IPv6
+                "IP:::1",  # IPv6
                 ]
     l_ip = get_local_ip()
     if l_ip != "127.0.0.1":
@@ -703,6 +703,21 @@ def create_self_signed_cert(cert_file, key_file, pem_file=None):
     if pem_file:
         with open(pem_file, "wb") as f:
             f.write(cert_pem + key_pem)
+
+    if pfx_file:
+        export_cert_to_pfx(pfx_file, cert_file, key_file)
+
+
+def export_cert_to_pfx(pfx_file, cert_file, key_file):
+    with open(cert_file, "rb") as f:
+        c = OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_PEM, f.read())
+    with open(key_file, "rb") as f:
+        k = OpenSSL.crypto.load_privatekey(OpenSSL.crypto.FILETYPE_PEM, f.read())
+    pfx = OpenSSL.crypto.PKCS12Type()
+    pfx.set_certificate(c)
+    pfx.set_privatekey(k)
+    with open(pfx_file, "wb") as f:
+        f.write(pfx.export())  # pfx.export("password")
 
 
 def log_exception(f=None, log=log):
@@ -743,3 +758,63 @@ def check_signature():
     #        var_pos = True
     #    elif sig.parameters[a].kind == inspect.Parameter.VAR_KEYWORD:
     #        var_key = True
+
+
+def language_to_code(language_name):
+    """
+    """
+    code = ""
+    try:
+        l = langcodes.find(language_name)
+        code = l.language
+    except LookupError:
+        pass
+    return code
+
+
+def get_real_file(path):
+    """
+    """
+    if path.endswith(constants.link_ext):
+        with open(path, 'r', encoding='utf-8') as fp:
+            path = fp.read()
+    return path
+
+
+def is_collection(obj):
+    if isinstance(obj, str):
+        return False
+    return hasattr(type(obj), '__iter__')
+
+
+def is_url(url, strict=False):
+    t = ("https://", "http://")
+    if not strict:
+        t += ("www.",)
+    return url.lower().startswith(t)
+
+
+def dict_merge(dct, merge_dct):
+    """ Recursive dict merge. Inspired by :meth:``dict.update()``, instead of
+    updating only top-level keys, dict_merge recurses down into dicts nested
+    to an arbitrary depth, updating keys. The ``merge_dct`` is merged into
+    ``dct``.
+    :param dct: dict onto which the merge is executed
+    :param merge_dct: dct merged into dct
+    """
+    for k in merge_dct:
+        if (k in dct and isinstance(dct[k], dict)
+                and isinstance(merge_dct[k], collections.Mapping)):
+            dict_merge(dct[k], merge_dct[k])
+        else:
+            dct[k] = merge_dct[k]
+    return dct
+
+
+def compare_json_dicts(a, b):
+    """
+    Compare two JSON compatible dicts
+    """
+    a_j = json.dumps(a, sort_keys=True, indent=2)
+    b_j = json.dumps(a, sort_keys=True, indent=2)
+    return a_j == b_j

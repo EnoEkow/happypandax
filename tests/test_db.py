@@ -59,22 +59,23 @@ class GeneralTest(unittest.TestCase):
         self.gallery.pub_date = arrow.now()
         self.gallery.timestamp = arrow.now()
         self.gallery.last_read = arrow.now()
+        self.gallery.last_read = datetime.datetime.utcnow()
+        self.assertTrue(isinstance(self.gallery.last_read, arrow.Arrow))
         self.session.commit()
 
     def test_history(self):
-        self.assertEqual(self.session.query(Event).count(), 1) # life
+        self.assertEqual(self.session.query(Event).count(), 0) #
 
         self.gallery.read(constants.default_user.id)
-        self.assertEqual(self.session.query(Event).count(), 2)
+        self.assertEqual(self.session.query(Event).count(), 1)
         self.gallery.read(constants.default_user.id)
         self.session.commit()
-        self.assertEqual(self.session.query(Event).count(), 3)
+        self.assertEqual(self.session.query(Event).count(), 2)
 
         self.gallery.delete()
 
-        self.assertEqual(self.session.query(Event).count(), 3)
+        self.assertEqual(self.session.query(Event).count(), 2)
 
-    #@unittest.expectedFailure
     def test_typesfail(self):
         with self.assertRaises(AssertionError):
             self.gallery.last_read = datetime.date.today()
@@ -186,6 +187,105 @@ class GeneralTest(unittest.TestCase):
         for n, i in enumerate(self.gallery.pages.all(), 1):
             self.assertEqual(i.number, n)
 
+
+    def tearDown(self):
+        self.session.close()
+
+class ItemUpdateTest(unittest.TestCase):
+    def setUp(self):
+        self.session = create_db()
+
+    def test_general(self):
+        self.gallery = Gallery()
+        with self.assertRaises(AssertionError) as e:
+            self.gallery.update("artists", "a1", op="test")
+
+
+    def test_gallery(self):
+        self.gallery = Gallery()
+        d = arrow.now()
+        self.gallery.update("last_read", d)
+        self.assertEqual(self.gallery.last_read, d)
+        self.gallery.update("single_source", False)
+        self.assertEqual(self.gallery.single_source, False)
+        self.gallery.update("number", 1)
+        self.assertEqual(self.gallery.number, 1)
+        
+        self.gallery.update("grouping", name="test")
+        self.assertIsNotNone(self.gallery.grouping)
+        self.assertEqual(self.gallery.grouping.name, "test")
+
+        self.gallery.update("language", Language(name="test2"))
+        self.assertIsNotNone(self.gallery.language)
+        self.assertEqual(self.gallery.language.name, "test2")
+
+        self.gallery.update("category", "test3")
+        self.assertIsNotNone(self.gallery.category)
+        self.assertEqual(self.gallery.category.name, "test3")
+
+        with self.assertRaises(AttributeError) as e:
+            self.gallery.update("artists", "a1")
+
+        anames = ["a1", "a2", "a3"]
+        self.gallery.update("artists", names=anames)
+        self.assertIsNotNone(self.gallery.artists)
+        self.assertEqual(len(self.gallery.artists), 1)
+        self.assertEqual(len(self.gallery.artists[0].names), 3)
+        for a in self.gallery.artists[0].names:
+            self.assertTrue(a.name in anames)
+            anames.remove(a.name)
+
+        self.gallery.update("pages", Page())
+        self.assertEqual(self.gallery.pages.count(), 1)
+        self.gallery.update("pages", [Page() for x in range(9)])
+        self.assertEqual(self.gallery.pages.count(), 10)
+
+    def test_metatags(self):
+        self.gallery = Gallery()
+        mtags = {x: True for x in MetaTag.names}
+        l = len(mtags)
+        self.assertGreater(l, 3)
+        self.assertEqual(len(self.gallery.metatags), 0)
+        self.gallery.update("metatags", mtags)
+        self.assertEqual(len(self.gallery.metatags), l)
+        mtags[MetaTag.names.inbox] = False
+        self.gallery.update("metatags", mtags)
+        self.assertEqual(len(self.gallery.metatags), l-1)
+        mtags[MetaTag.names.favorite] = False
+        self.gallery.update("metatags", mtags)
+        self.assertEqual(len(self.gallery.metatags), l-2)
+        mtags[MetaTag.names.inbox] = True
+        self.gallery.update("metatags", mtags)
+        self.assertEqual(len(self.gallery.metatags), l-1)
+        for x in mtags:
+            mtags[x] = False
+        self.gallery.update("metatags", mtags)
+        self.assertEqual(len(self.gallery.metatags), 0)
+
+        self.gallery.update("metatags", MetaTag(name="test"))
+        self.assertEqual(len(self.gallery.metatags), 1)
+        self.assertEqual(self.gallery.metatags[0].name, "test")
+        for x in mtags:
+            mtags[x] = True
+        self.gallery.update("metatags", mtags)
+        self.assertEqual(len(self.gallery.metatags), l+1)
+        self.gallery.metatags.clear()
+        self.assertEqual(len(self.gallery.metatags), 0)
+
+        m = MetaTag(name="test")
+        self.gallery.update("metatags", [MetaTag(name="test"+str(x)) for x in range(5)])
+        self.assertEqual(len(self.gallery.metatags), 5)
+        self.gallery.update("metatags", m)
+        self.assertEqual(len(self.gallery.metatags), 6)
+        self.gallery.update("metatags", m, op="remove")
+        self.assertEqual(len(self.gallery.metatags), 5)
+
+        self.gallery.update("metatags", "test", op="remove")
+        self.assertEqual(len(self.gallery.metatags), 5)
+        self.gallery.update("metatags", "test", op="add")
+        self.assertEqual(len(self.gallery.metatags), 6)
+        self.gallery.update("metatags", "test", op="remove")
+        self.assertEqual(len(self.gallery.metatags), 5)
 
     def tearDown(self):
         self.session.close()
@@ -332,36 +432,37 @@ class ArtistNameRelationship(unittest.TestCase):
         self.gallery = Gallery()
         self.artist = Artist()
         self.gallery.artists.append(self.artist)
-        self.names = [AliasName(name='name'+str(x)) for x in range(10)]
+        self.names = [ArtistName(name='name'+str(x)) for x in range(10)]
         root = self.names[0]
         for n in self.names[1:]:
             n.alias_for = root
         self.session.add(self.gallery)
         self.artist.names.append(root)
         self.session.commit()
+        assert not self.names[0].alias_for
 
         self.assertEqual(len(self.artist.names), 1)
         self.assertEqual(len(root.aliases), 9)
-        self.assertEqual(self.session.query(AliasName).count(), 10)
+        self.assertEqual(self.session.query(ArtistName).count(), 10)
 
     def test_delete(self):
         self.session.delete(self.names[1])
         self.session.commit()
         self.assertEqual(self.session.query(Artist).count(), 1)
-        self.assertEqual(self.session.query(AliasName).count(), 9)
+        self.assertEqual(self.session.query(ArtistName).count(), 9)
         self.assertEqual(self.artist.names[0], self.names[0])
 
     def test_delete2(self):
         self.session.delete(self.names[0])
         self.session.commit()
         self.assertEqual(self.session.query(Artist).count(), 1)
-        self.assertEqual(self.session.query(AliasName).count(), 0)
+        self.assertEqual(self.session.query(ArtistName).count(), 0)
 
     def test_no_orphans(self):
         self.session.delete(self.artist)
         self.session.commit()
         self.assertEqual(self.session.query(Artist).count(), 0)
-        self.assertEqual(self.session.query(AliasName).count(), 0)
+        self.assertEqual(self.session.query(ArtistName).count(), 0)
 
     def tearDown(self):
         self.session.close()
@@ -407,7 +508,7 @@ class ParodyNameRelationship(unittest.TestCase):
         self.gallery = Gallery()
         self.parody = Parody()
         self.gallery.parodies.append(self.parody)
-        self.names = [AliasName(name='name'+str(x)) for x in range(10)]
+        self.names = [ParodyName(name='name'+str(x)) for x in range(10)]
         root = self.names[0]
         for n in self.names[1:]:
             n.alias_for = root
@@ -417,26 +518,26 @@ class ParodyNameRelationship(unittest.TestCase):
 
         self.assertEqual(len(self.parody.names), 1)
         self.assertEqual(len(root.aliases), 9)
-        self.assertEqual(self.session.query(AliasName).count(), 10)
+        self.assertEqual(self.session.query(ParodyName).count(), 10)
 
     def test_delete(self):
         self.session.delete(self.names[1])
         self.session.commit()
         self.assertEqual(self.session.query(Parody).count(), 1)
-        self.assertEqual(self.session.query(AliasName).count(), 9)
+        self.assertEqual(self.session.query(ParodyName).count(), 9)
         self.assertEqual(self.parody.names[0], self.names[0])
 
     def test_delete2(self):
         self.session.delete(self.names[0])
         self.session.commit()
         self.assertEqual(self.session.query(Parody).count(), 1)
-        self.assertEqual(self.session.query(AliasName).count(), 0)
+        self.assertEqual(self.session.query(ParodyName).count(), 0)
 
     def test_no_orphans(self):
         self.session.delete(self.parody)
         self.session.commit()
         self.assertEqual(self.session.query(Parody).count(), 0)
-        self.assertEqual(self.session.query(AliasName).count(), 0)
+        self.assertEqual(self.session.query(ParodyName).count(), 0)
 
     def tearDown(self):
         self.session.close()
@@ -667,7 +768,7 @@ class StatusRelationship(unittest.TestCase):
         self.session.add_all(self.galleryns)
         self.session.add(self.status)
         self.session.commit()
-        self.assertEqual(self.session.query(Status).count(), 1)
+        self.assertEqual(self.session.query(Status).count(), 1+len(Status.names))
         self.assertEqual(self.session.query(Grouping).count(), 2)
         self.assertEqual(self.session.query(Gallery).count(), 10)
         self.assertEqual(self.status, self.galleryns[0].status)
@@ -685,14 +786,14 @@ class StatusRelationship(unittest.TestCase):
         self.session.commit()
 
         self.assertEqual(self.session.query(Grouping).count(), 1)
-        self.assertEqual(self.session.query(Status).count(), 1)
+        self.assertEqual(self.session.query(Status).count(), 1+len(Status.names))
 
     def test_orphans(self):
         self.session.query(Grouping).delete()
         self.session.commit()
 
         self.assertEqual(self.session.query(Grouping).count(), 0)
-        self.assertEqual(self.session.query(Status).count(), 1)
+        self.assertEqual(self.session.query(Status).count(), 1+len(Status.names))
 
     def tearDown(self):
         self.session.close()

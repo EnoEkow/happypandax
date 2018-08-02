@@ -1,3 +1,4 @@
+import sys
 import arrow
 import os
 import enum
@@ -7,11 +8,18 @@ import warnings
 import functools
 import gevent
 import threading
+import pathlib
+import langcodes
 import inspect as pyinspect
+import alembic.config
+import alembic.command
+import alembic.script
+import alembic.migration
+import datetime
 
 from contextlib import contextmanager
 from sqlalchemy.engine import Engine
-from sqlalchemy.engine.url import URL
+from sqlalchemy.engine.url import URL, make_url as sa_make_url
 from sqlalchemy import String as _String
 from sqlalchemy import Text as _Text
 from sqlalchemy import exc as sa_exc
@@ -33,10 +41,13 @@ from sqlalchemy.orm import (
     object_session,
     scoped_session,
     attributes,
+    properties,
     state,
     collections,
     dynamic,
-    backref)
+    backref,
+    exc as exc_orm,
+)
 from sqlalchemy import (
     create_engine,
     event,
@@ -75,6 +86,9 @@ and_op = and_
 or_op = or_
 sa_text = text
 desc_expr = desc
+
+expunge_cascade = "save-update, merge, refresh-expire, expunge"
+default_cascade = "save-update, merge, refresh-expire"
 
 
 class OrderingQuery(dynamic.AppenderQuery):
@@ -271,6 +285,16 @@ class LowerCaseString(TypeDecorator):
         return value.lower()
 
 
+class CapitalizedString(TypeDecorator):
+    """
+    Ensures strings capitalized
+    """
+    impl = String
+
+    def process_bind_param(self, value, dialect):
+        return value.capitalize()
+
+
 class RegexMatchExpression(BinaryExpression):
     """Represents matching of a column againsts a regular expression."""
 
@@ -391,12 +415,116 @@ class Base:
     _properties = Column(JSONType, nullable=False, default={})
     plugin = index_property('_properties', 'plugin', default={})
 
+    def replace_with(self, obj):
+        """
+        """
+        assert isinstance(obj, type(self))
+        with no_autoflush(object_session(obj)):
+            for k, v in obj.__dict__.items():
+                setattr(self, k, v)
+
     def delete(self):
         sess = object_session(self)
         if not sess:
             sess = constants.db_session()
-        sess.delete(self)
+        with no_autoflush(sess):
+            sess.delete(self)
         return sess
+
+    def update(self, attr_name, value=None, op="add", **kw):
+        """
+        """
+        ops = ("add", "remove")
+        assert op in ops, f"op must be one of {ops}"
+
+        if not isinstance(attr_name, str):
+            attr_name = column_name(attr_name)
+
+        if value is None and kw:
+            value = kw
+
+        col_model = column_model(getattr(self.__class__, attr_name))
+
+        def do_op(x, v, o, check=True):
+            if is_list(x) or is_query(x):
+                if o == "add":
+                    if check and v not in x:
+                        x.append(v)
+                    elif not check:
+                        x.append(v)
+                elif o == "remove":
+                    if check and v in x:
+                        x.remove(v)
+                    elif not check:
+                        x.remove(v)
+                else:
+                    raise NotImplementedError
+            elif issubclass(col_model, Base):
+                if o == "add":
+                    setattr(self, attr_name, v)
+                elif o == "remove":
+                    setattr(self, attr_name, None)
+            else:
+                raise NotImplementedError
+
+        with no_autoflush(object_session(self)):
+            attr_value = getattr(self, attr_name)
+            models = (NameMixin, )
+            try:
+                rel_col = issubclass(col_model, Base)
+            except TypeError:
+                rel_col = False
+
+            if rel_col or is_list(attr_value) or is_query(attr_value):
+                if not utils.is_collection(value) or isinstance(value, dict):
+                    value = [value]
+
+                for x in value:
+                    if issubclass(col_model, MetaTag):
+                        if isinstance(x, dict) and len(x.keys()) == 1 and 'name' in x:
+                            x = x['name']
+
+                        if isinstance(x, dict):  # {tag_name: True, tag_name:False, etc.}
+                            for m_name, m_value in x.items():
+                                mtag = col_model.as_unique(name=m_name)
+                                if m_value:
+                                    if mtag not in attr_value:
+                                        attr_value.append(mtag)
+                                else:
+                                    if mtag in attr_value:
+                                        attr_value.remove(mtag)
+                        elif isinstance(x, list):
+                            for m in x:
+                                if isinstance(m, str):
+                                    m = col_model.as_unique(name=m)
+                                do_op(attr_value, m, op)
+                        elif isinstance(x, str):
+                            x = col_model.as_unique(name=x)
+                            do_op(attr_value, x, op)
+                        else:
+                            do_op(attr_value, x, op)
+
+                    elif isinstance(x, Base):
+                        do_op(attr_value, x, op)
+                    elif isinstance(x, str) and issubclass(col_model, models):
+                        if issubclass(col_model, NameMixin):
+                            v = col_model.as_unique(name=x)
+                            do_op(attr_value, v, op)
+                        else:
+                            raise NotImplementedError
+                    elif isinstance(x, dict) and rel_col:
+                        if issubclass(col_model, UniqueMixin):
+                            v = col_model.as_unique(**x)
+                            do_op(attr_value, v, op)
+                        else:
+                            v = col_model(**x)
+                            do_op(attr_value, v, op)
+                    elif rel_col:
+                        do_op(attr_value, x, op)
+                    else:
+                        do_op(attr_value, x, op)
+            else:
+                setattr(self, attr_name, value)
 
 
 def _unique(session, cls, hashfunc, queryfunc, constructor, arg, kw):
@@ -412,6 +540,7 @@ def _unique(session, cls, hashfunc, queryfunc, constructor, arg, kw):
             q = session.query(cls)
             q = queryfunc(q, *arg, **kw)
             obj = q.first()
+            #import pdb; pdb.set_trace();
             if not obj:
                 obj = constructor(*arg, **kw)
                 session.add(obj)
@@ -429,9 +558,9 @@ class UniqueMixin:
         raise NotImplementedError()
 
     @classmethod
-    def as_unique(cls, *arg, **kw):
+    def as_unique(cls, *arg, session=None, **kw):
         return _unique(
-            constants.db_session(),
+            session or constants.db_session(),
             cls,
             cls.unique_hash,
             cls.unique_filter,
@@ -443,6 +572,10 @@ class UniqueMixin:
 class NameMixin(UniqueMixin):
     name = Column(String, nullable=False, default='', unique=True)
 
+    def __init__(self, *args, name="", **kwargs):
+        super().__init__(*args, **kwargs)
+        self.name = name
+
     @classmethod
     def unique_hash(cls, name):
         return name
@@ -451,11 +584,11 @@ class NameMixin(UniqueMixin):
     def unique_filter(cls, query, name):
         return query.filter(cls.name == name)
 
-    def exists(self, obj=False, strict=False):
-        "obj: queries for the full object and returns it"
-        if not constants.db_session:
+    def exists(self, obj=False, strict=False, session=None):
+        "obj: if true queries for the full object and returns it"
+        if not session and not constants.db_session:
             return self
-        sess = constants.db_session()
+        sess = session or constants.db_session()
         if obj:
             if strict:
                 e = sess.query(
@@ -480,7 +613,6 @@ class NameMixin(UniqueMixin):
                     self.__class__.name.ilike(
                         "%{}%".format(
                             self.name))).scalar() is not None
-        sess.close()
         return e
 
     def __repr__(self):
@@ -488,7 +620,59 @@ class NameMixin(UniqueMixin):
             self.__class__.__name__, self.id, self.name)
 
 
+class LowerNameMixin(NameMixin):
+    name = Column(LowerCaseString, nullable=False, default='', unique=True)
+
+    @classmethod
+    def as_unique(cls, *args, **kwargs):
+        if 'name' in kwargs:
+            kwargs['name'] = kwargs['name'].lower()
+        return super().as_unique(*args, **kwargs)
+
+    @classmethod
+    def unique_hash(cls, *args, **kwargs):
+        if 'name' in kwargs:
+            kwargs['name'] = kwargs['name'].lower()
+        return super().unique_hash(*args, **kwargs)
+
+    @classmethod
+    def unique_filter(cls, *args, **kwargs):
+        if 'name' in kwargs:
+            kwargs['name'] = kwargs['name'].lower()
+        return super().unique_filter(*args, **kwargs)
+
+
+class CapitalizedNameMixin(NameMixin):
+    name = Column(CapitalizedString, nullable=False, default='', unique=True)
+
+    @classmethod
+    def as_unique(cls, *args, **kwargs):
+        if 'name' in kwargs:
+            kwargs['name'] = kwargs['name'].capitalize()
+        return super().as_unique(*args, **kwargs)
+
+    @classmethod
+    def unique_hash(cls, *args, **kwargs):
+        if 'name' in kwargs:
+            kwargs['name'] = kwargs['name'].capitalize()
+        return super().unique_hash(*args, **kwargs)
+
+    @classmethod
+    def unique_filter(cls, *args, **kwargs):
+        if 'name' in kwargs:
+            kwargs['name'] = kwargs['name'].capitalize()
+        return super().unique_filter(*args, **kwargs)
+
+
 class AliasMixin:
+
+    @declared_attr
+    def language_id(cls):
+        return Column(Integer, ForeignKey('language.id'))
+
+    @declared_attr
+    def language(cls):
+        return relationship("Language", cascade=expunge_cascade)
 
     @declared_attr
     def alias_for_id(cls):
@@ -521,6 +705,9 @@ class AliasMixin:
             return alias.alias_for
         return alias
 
+    def __init__(self, *args, **kwargs):
+        return super().__init__(*args, **kwargs)
+
 
 class ProfileMixin:
 
@@ -539,15 +726,25 @@ class UserMixin:
     def user(cls):
         return relationship(
             "User",
-            cascade="save-update, merge, refresh-expire")
+            cascade=expunge_cascade)
 
     @declared_attr
     def user_id(cls):
-        return Column(Integer, ForeignKey('user.id'))
+        return Column(Integer, ForeignKey('user.id'), default=cls.current_user)
 
-    def __init__(self, *args, **kwargs):
-        pass
-        # TODO: set current user here
+    def __init__(self, *args, user=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        if user is not None:
+            self.user = user
+
+    @classmethod
+    def current_user(cls):
+        "Retrieve the current user"
+        u = constants.default_user
+        ctx = utils.get_context()
+        if ctx:
+            u = ctx.get('user')
+        return u.id if u else None
 
 
 def validate_int(value):
@@ -574,7 +771,7 @@ def validate_string(value):
 
 def validate_arrow(value):
     assert isinstance(
-        value, arrow.Arrow) or value is None, "Column only accepts arrow types, not {}".format(
+        value, (arrow.Arrow, datetime.datetime)) or value is None, "Column only accepts arrow or datetime types, not {}".format(
         type(value))
     return value
 
@@ -656,6 +853,28 @@ def metatag_association(cls, bref="items"):
         lazy='joined',
         backref=backref(bref, lazy="dynamic"),
         cascade="all")
+
+    def on_metatag_event(self, metatag, is_remove):
+        """
+        """
+        if is_remove:
+            pass
+        else:
+            if isinstance(self, Gallery) and metatag.name == MetaTag.names.favorite:
+                if not self.rating and config.auto_rate_gallery_on_favorite.value:
+                    self.rating = 10
+        return metatag
+
+    cls.on_metatag_event = on_metatag_event
+
+    @event.listens_for(cls.metatags, 'remove', retval=True, propagate=True)
+    def rec_remove(target, value, initator):
+        return target.on_metatag_event(value, True)
+
+    @event.listens_for(cls.metatags, 'append', retval=True, propagate=True)
+    def rec_append(target, value, initator):
+        return target.on_metatag_event(value, False)
+
     return assoc
 
 
@@ -680,24 +899,9 @@ def metalist_association(cls, bref="items"):
     return assoc
 
 
-def aliasname_association(cls, bref="items"):
+def setup_preffered_name(cls):
     if not issubclass(cls, Base):
         raise ValueError("Must be subbclass of Base")
-    table_name = cls.__tablename__
-    column = '{}_id'.format(table_name)
-    assoc = Table(
-        '{}_aliasname'.format(table_name), Base.metadata, Column(
-            'aliasname_id', Integer, ForeignKey('aliasname.id')), Column(
-            column, Integer, ForeignKey(
-                '{}.id'.format(table_name))), UniqueConstraint(
-                    'aliasname_id', column))
-
-    cls.names = relationship(
-        "AliasName",
-        secondary=assoc,
-        lazy='joined',
-        backref=backref(bref, lazy="dynamic"),
-        cascade="all")
 
     def preferred_name(self):
         t = self.name_by_language(config.translation_locale.value)
@@ -713,7 +917,6 @@ def aliasname_association(cls, bref="items"):
 
     cls.name_by_language = hybrid_method(name_by_language)
     cls.preferred_name = hybrid_property(preferred_name)
-    return assoc
 
 
 def url_association(cls, bref="items"):
@@ -752,7 +955,12 @@ class Life(Base):
 class MetaTag(NameMixin, Base):
     __tablename__ = 'metatag'
 
-    names = clsutils.AttributeList("favorite", "inbox", "readlater", "trash")
+    names = clsutils.AttributeList("favorite",
+                                   "inbox",
+                                   "readlater",
+                                   "trash",
+                                   "follow",
+                                   "read")
     tags = {}
 
     @classmethod
@@ -761,7 +969,7 @@ class MetaTag(NameMixin, Base):
         return tuple(x[0] for x in sess.query(cls.name).all())
 
 
-class User(Base):
+class User(NameMixin, Base):
     __tablename__ = 'user'
 
     class Role(enum.Enum):
@@ -777,9 +985,9 @@ class User(Base):
     password = Column(Password)
     timestamp = Column(ArrowType, nullable=False, default=arrow.now)
     rights = Column(JSONType, nullable=False, default={})
-    right_add_gallery = index_property("rights", "add_gallery", default=True)
-    right_remove_gallery = index_property("rights", "remove_gallery", default=True)
-    right_update_gallery = index_property("rights", "update_gallery", default=True)
+    right_add_gallery = index_property("rights", "add_gallery", default=False)
+    right_remove_gallery = index_property("rights", "remove_gallery", default=False)
+    right_update_gallery = index_property("rights", "update_gallery", default=False)
 
     events = relationship("Event", lazy='dynamic', back_populates='user')
 
@@ -814,22 +1022,21 @@ class Event(Base):
     __tablename__ = 'event'
 
     class Action(enum.Enum):
-        gallery_update = 'gallery_update'
-        gallery_delete = 'gallery_delete'
+        object_update = 'object_update'
+        object_delete = 'object_delete'
         gallery_read = 'gallery_read'
-        app_start = 'app_start'
-        app_shutdown = 'app_shutdown'
 
     item_id = Column(Integer)
     name = Column(String, nullable=False, default="")
     by_table = Column(String, nullable=False, default="")
     timestamp = Column(ArrowType, nullable=False, default=arrow.now)
     action = Column(String, nullable=False)
-    user_id = Column(Integer, ForeignKey('user.id'))
+    extra = Column(JSONType, nullable=False, default={})
+    user_id = Column(Integer, ForeignKey('user.id'), default=UserMixin.current_user)
     user = relationship(
         "User",
         back_populates="events",
-        cascade="save-update, merge, refresh-expire")
+        cascade=expunge_cascade)
 
     def __init__(self, action, item, name=None, user_id=None, timestamp=None):
         assert isinstance(item, Base)
@@ -851,16 +1058,16 @@ class Hash(NameMixin, Base):
 
 
 @generic_repr
-class NamespaceTags(AliasMixin, UserMixin, Base):
+class NamespaceTags(UniqueMixin, AliasMixin, UserMixin, Base):
     __tablename__ = 'namespace_tags'
 
     tag_id = Column(Integer, ForeignKey('tag.id'))
     namespace_id = Column(Integer, ForeignKey('namespace.id'))
     __table_args__ = (UniqueConstraint('tag_id', 'namespace_id'),)
 
-    tag = relationship("Tag", cascade="save-update, merge, refresh-expire")
+    tag = relationship("Tag", cascade=expunge_cascade)
     namespace = relationship("Namespace",
-                             cascade="save-update, merge, refresh-expire")
+                             cascade=expunge_cascade)
 
     parent_id = Column(Integer, ForeignKey("namespace_tags.id"), nullable=True)
     parent = relationship("NamespaceTags",
@@ -870,8 +1077,14 @@ class NamespaceTags(AliasMixin, UserMixin, Base):
 
     def __init__(self, ns=None, tag=None, **kwargs):
         super().__init__(**kwargs)
+        if isinstance(ns, str):
+            ns = Namespace.as_unique(name=ns)
+        if isinstance(tag, str):
+            tag = Tag.as_unique(name=tag)
         self.namespace = ns
         self.tag = tag
+        if tag and not ns:
+            self.namespace = Namespace.default()
 
     @validates('children')
     def validate_child(self, key, child):
@@ -907,28 +1120,60 @@ class NamespaceTags(AliasMixin, UserMixin, Base):
             alias = alias.alias_for
         return alias
 
-    def mapping_exists(self):
-        sess = constants.db_session()
-        e = sess.query(
-            self.__class__).filter_by(
-            and_(
-                tag_id=self.tag_id,
-                namespace_id=self.namespace_id)).scalar()
-        if not e:
-            e = self
-        sess.close()
+    def mapping_exists(self, obj=False, session=None):
+        e = None
+        sess = session or constants.db_session()
+
+        if self.tag and self.tag.id:
+            tag_id = self.tag.id
+        else:
+            tag_id = self.tag_id
+
+        if self.namespace and self.namespace.id:
+            namespace_id = self.namespace.id
+        else:
+            namespace_id = self.namespace_id
+
+        if tag_id and namespace_id:
+            e = sess.query(
+                self.__class__).filter(
+                and_op(
+                    self.__class__.tag_id == tag_id,
+                    self.__class__.namespace_id == namespace_id)).scalar()
+        if not obj:
+            e = True if e else False
+        else:
+            if not e:
+                e = self
         return e
+
+    def exists(self, *args, **kwargs):
+        return self.mapping_exists(*args, **kwargs)
+
+    @classmethod
+    def unique_hash(cls, ns=None, tag=None):
+        assert not isinstance(ns, Namespace)
+        assert not isinstance(tag, Tag)
+        if ns is None:
+            ns = constants.special_namespace
+        return (Namespace.format(ns), Tag.format(tag))
+
+    @classmethod
+    def unique_filter(cls, query, ns=None, tag=None):
+        assert not isinstance(ns, Namespace)
+        assert not isinstance(tag, Tag)
+        if ns is None:
+            ns = constants.special_namespace
+        return query.join(cls.namespace).join(cls.tag).filter(and_op(Namespace.name == Namespace.format(ns),
+                                                                     Tag.name == Tag.format(tag)))
 
 
 metatag_association(NamespaceTags, "namespacetags")
 
 
 @generic_repr
-class Tag(NameMixin, AliasMixin, Base):
+class Tag(LowerNameMixin, AliasMixin, Base):
     __tablename__ = 'tag'
-
-    language_id = Column(Integer, ForeignKey('language.id'))
-    language = relationship("Language", cascade="all")
 
     namespaces = relationship(
         "Namespace",
@@ -936,12 +1181,15 @@ class Tag(NameMixin, AliasMixin, Base):
         back_populates='tags',
         lazy="dynamic")
 
+    @classmethod
+    def format(cls, tag):
+        if tag:
+            return tag.lower()
+        return tag
 
-class Namespace(NameMixin, AliasMixin, Base):
+
+class Namespace(CapitalizedNameMixin, AliasMixin, Base):
     __tablename__ = 'namespace'
-
-    language_id = Column(Integer, ForeignKey('language.id'))
-    language = relationship("Language", cascade="all")
 
     tags = relationship(
         "Tag",
@@ -949,13 +1197,25 @@ class Namespace(NameMixin, AliasMixin, Base):
         back_populates='namespaces',
         lazy="dynamic")
 
+    @classmethod
+    def default(cls):
+        return Namespace.as_unique(name=constants.special_namespace)
+
+    @classmethod
+    def format(cls, ns):
+        if ns:
+            return ns.capitalize()
+        return ns
+
 
 taggable_tags = Table(
     'taggable_tags', Base.metadata,
     Column(
         'namespace_tag_id', Integer, ForeignKey('namespace_tags.id')),
     Column(
-        'taggable_id', Integer, ForeignKey('taggable.id')), UniqueConstraint(
+        'taggable_id', Integer, ForeignKey('taggable.id')),
+    Column('timestamp', ArrowType, nullable=False, default=arrow.now),
+    UniqueConstraint(
         'namespace_tag_id', 'taggable_id'))
 
 
@@ -991,19 +1251,11 @@ class TaggableMixin(UpdatedMixin):
         super().__init__(**kwargs)
         self.taggable = Taggable()
 
-    @property
+    @hybrid_property
     def tags(self):
         return self.taggable.tags
 
     compact_tags = Taggable.compact_tags
-
-
-@generic_repr
-class AliasName(NameMixin, AliasMixin, Base):
-    __tablename__ = 'aliasname'
-
-    language_id = Column(Integer, ForeignKey('language.id'))
-    language = relationship("Language", cascade="all")
 
 
 gallery_artists = Table(
@@ -1020,10 +1272,30 @@ artist_circles = Table(
                     'artist.id',)), UniqueConstraint(
                         'circle_id', 'artist_id'))
 
+artist_names = Table(
+    'artist_names', Base.metadata, Column(
+        'artistname_id', Integer, ForeignKey(
+            'artistname.id',)), Column(
+                'artist_id', Integer, ForeignKey(
+                    'artist.id',)), UniqueConstraint(
+                        'artistname_id', 'artist_id'))
+
 
 @generic_repr
-class Artist(ProfileMixin, UserMixin, Base):
+class ArtistName(NameMixin, AliasMixin, Base):
+    __tablename__ = 'artistname'
+
+
+@generic_repr
+class Artist(UniqueMixin, ProfileMixin, UserMixin, Base):
     __tablename__ = 'artist'
+
+    names = relationship(
+        "ArtistName",
+        secondary=artist_names,
+        backref=backref("artists", lazy="dynamic"),
+        cascade="all",
+        lazy="joined")
 
     info = Column(Text, nullable=False, default='')
 
@@ -1032,19 +1304,48 @@ class Artist(ProfileMixin, UserMixin, Base):
         secondary=gallery_artists,
         back_populates='artists',
         lazy="dynamic",
-        cascade="save-update, merge, refresh-expire")
+        cascade=default_cascade)
 
     circles = relationship(
         "Circle",
         secondary=artist_circles,
         back_populates='artists',
         lazy="joined",
-        cascade="save-update, merge, refresh-expire")
+        cascade=expunge_cascade)
+
+    def __init__(self, *args, **kwargs):
+        names = kwargs.pop("names", [])
+        name = kwargs.pop("name", None)
+        if name:
+            names.append(name)
+        super().__init__(*args, **kwargs)
+        for n in names:
+            n = ArtistName.as_unique(name=n)
+            if n not in self.names:
+                self.names.append(n)
+
+    @classmethod
+    def unique_hash(cls, name=None, names=None):
+        n = []
+        if name:
+            n.append(name)
+        if names:
+            n.extend(names)
+        return tuple(n)
+
+    @classmethod
+    def unique_filter(cls, query, name=None, names=None):
+        n = []
+        if name:
+            n.append(name)
+        if names:
+            n.extend(names)
+        return query.join(cls.names).filter(and_op(*(ArtistName.name == x for x in n)))
 
 
+setup_preffered_name(Artist)
 metatag_association(Artist, "artists")
 profile_association(Artist, "artists")
-aliasname_association(Artist, "artists")
 url_association(Artist, "artists")
 
 
@@ -1065,10 +1366,30 @@ gallery_parodies = Table(
             'gallery_id', Integer, ForeignKey('gallery.id')), PrimaryKeyConstraint(
                 'parody_id', 'gallery_id'))
 
+parody_names = Table(
+    'parody_names', Base.metadata, Column(
+        'parodyname_id', Integer, ForeignKey(
+            'parodyname.id',)), Column(
+                'parody_id', Integer, ForeignKey(
+                    'parody.id',)), UniqueConstraint(
+                        'parodyname_id', 'parody_id'))
+
 
 @generic_repr
-class Parody(ProfileMixin, UserMixin, Base):
+class ParodyName(NameMixin, AliasMixin, Base):
+    __tablename__ = 'parodyname'
+
+
+@generic_repr
+class Parody(UniqueMixin, ProfileMixin, UserMixin, Base):
     __tablename__ = 'parody'
+
+    names = relationship(
+        "ParodyName",
+        secondary=parody_names,
+        backref=backref("parodies", lazy="dynamic"),
+        cascade="all",
+        lazy="joined")
 
     galleries = relationship(
         "Gallery",
@@ -1076,11 +1397,38 @@ class Parody(ProfileMixin, UserMixin, Base):
         back_populates='parodies',
         lazy="dynamic")
 
+    def __init__(self, *args, **kwargs):
+        names = kwargs.pop("names", [])
+        name = kwargs.pop("name", None)
+        if name:
+            names.append(name)
+        super().__init__(*args, **kwargs)
+        for n in names:
+            n = ParodyName.as_unique(name=n)
+            if n not in self.names:
+                self.names.append(n)
 
+    @classmethod
+    def unique_hash(cls, name=None, names=None):
+        n = []
+        if name:
+            n.append(name)
+        if names:
+            n.extend(names)
+        return tuple(n)
+
+    @classmethod
+    def unique_filter(cls, query, name=None, names=None):
+        n = []
+        if name:
+            n.append(name)
+        if names:
+            n.extend(names)
+        return query.join(cls.names).filter(and_op(*(ParodyName.name == x for x in n)))
+
+
+setup_preffered_name(Parody)
 profile_association(Parody, "parodies")
-
-
-aliasname_association(Parody, "parodies")
 
 gallery_filters = Table('gallery_filters', Base.metadata,
                         Column('filter_id', Integer, ForeignKey('filter.id')),
@@ -1088,6 +1436,7 @@ gallery_filters = Table('gallery_filters', Base.metadata,
                             'gallery_id',
                             Integer,
                             ForeignKey('gallery.id')),
+                        Column('timestamp', ArrowType, nullable=False, default=arrow.now),
                         UniqueConstraint('filter_id', 'gallery_id'))
 
 
@@ -1111,6 +1460,13 @@ class GalleryFilter(UserMixin, NameMixin, Base):
 class Status(NameMixin, UserMixin, Base):
     __tablename__ = 'status'
 
+    names = clsutils.AttributeDict({
+        'completed': 'Completed',
+        'ongoing': 'Ongoing',
+        'unreleased': 'Unreleased',
+        'unknown': 'Unknown',
+    })
+
     groupings = relationship(
         "Grouping",
         lazy='dynamic',
@@ -1131,7 +1487,7 @@ class Grouping(ProfileMixin, NameMixin, Base):
     status = relationship(
         "Status",
         back_populates="groupings",
-        cascade="save-update, merge, refresh-expire")
+        cascade=expunge_cascade)
 
 
 profile_association(Grouping, "groupings")
@@ -1147,6 +1503,35 @@ class Language(NameMixin, UserMixin, Base):
         "Gallery",
         lazy='dynamic',
         back_populates='language')
+
+    @validates("name")
+    def validate_name(self, key, name):
+        name, code = self._real_name(name)
+        if code:
+            self.code = code
+        return name
+
+    @classmethod
+    def _real_name(cls, name):
+        code = ''
+        try:
+            l = langcodes.find(name)
+            name = utils.capitalize_text(l.autonym())
+            code = l.language
+        except LookupError:
+            pass
+        return name, code
+
+    @validates("code")
+    def validate_code(self, key, code):
+        return utils.get_language_code(code)
+
+    @classmethod
+    def as_unique(cls, *arg, session=None, **kw):
+        if 'name' in kw:
+            name, _ = cls._real_name(kw['name'])
+            kw['name'] = name
+        return super().as_unique(*arg, session=session, **kw)
 
 
 @generic_repr
@@ -1178,7 +1563,7 @@ class Collection(ProfileMixin, UpdatedMixin, NameMixin, UserMixin, Base):
 
     category = relationship(
         "Category",
-        cascade="save-update, merge, refresh-expire")
+        cascade=expunge_cascade)
 
     galleries = relationship(
         "Gallery",
@@ -1186,7 +1571,7 @@ class Collection(ProfileMixin, UpdatedMixin, NameMixin, UserMixin, Base):
         order_by=desc_expr(gallery_collections.c.timestamp),
         back_populates="collections",
         lazy="dynamic",
-        cascade="save-update, merge, refresh-expire")
+        cascade=default_cascade)
 
 
 profile_association(Collection, "collections")
@@ -1213,27 +1598,27 @@ class Gallery(TaggableMixin, ProfileMixin, Base):
     grouping = relationship(
         "Grouping",
         back_populates="galleries",
-        cascade="save-update, merge, refresh-expire")
+        cascade=expunge_cascade)
     collections = relationship(
         "Collection",
         secondary=gallery_collections,
         back_populates="galleries",
-        cascade="save-update, merge, refresh-expire",
+        cascade=expunge_cascade,
         lazy="dynamic")
     language = relationship(
         "Language",
         back_populates="galleries",
-        cascade="save-update, merge, refresh-expire")
+        cascade=expunge_cascade)
     category = relationship(
         "Category",
         back_populates="galleries",
-        cascade="save-update, merge, refresh-expire")
+        cascade=expunge_cascade)
     artists = relationship(
         "Artist",
         secondary=gallery_artists,
         back_populates='galleries',
         lazy="joined",
-        cascade="save-update, merge, refresh-expire")
+        cascade=expunge_cascade)
     filters = relationship(
         "GalleryFilter",
         secondary=gallery_filters,
@@ -1256,12 +1641,24 @@ class Gallery(TaggableMixin, ProfileMixin, Base):
         secondary=gallery_parodies,
         back_populates='galleries',
         lazy="joined",
-        cascade="save-update, merge, refresh-expire")
+        cascade=expunge_cascade)
+
+    first_page = relationship(lambda: Page,
+                              primaryjoin=lambda: and_op(
+                                  Gallery.id == Page.gallery_id,
+                                  Page.number == select([func.min(Page.number)]).
+                                  where(Page.gallery_id == Gallery.id).
+                                  correlate(Gallery.__table__)
+                              ),
+                              uselist=False,
+                              )
 
     def read(self, user_id=None, datetime=None):
         "Creates a read event for user"
         if not datetime:
             datetime = arrow.now()
+        if user_id is None:
+            user_id = UserMixin.current_user()
         self.last_read = datetime
         sess = object_session(self)
         if sess:
@@ -1271,6 +1668,12 @@ class Gallery(TaggableMixin, ProfileMixin, Base):
                 "Cannot add gallery read event because no session exists for this object")
         self.times_read += 1
         self.last_read = datetime
+        for m in self.metatags:
+            if m.name == MetaTag.names.read:
+                break
+        else:
+            m = MetaTag.as_unique(name=MetaTag.names.read, session=sess)
+            self.metatags.append(m)
 
     @hybrid_property
     def preferred_title(self):
@@ -1281,19 +1684,23 @@ class Gallery(TaggableMixin, ProfileMixin, Base):
 
     @preferred_title.setter
     def preferred_title(self, title):
-        raise NotImplementedError
+        pref_title = self.preferred_title
+        assert pref_title, "This gallery has no titles"
         if not isinstance(title, Title):
             title = Title()
             title.gallery = self
             title.name = title
-        lcode = config.translation_locale.value
-        title.language = Language(lcode)
+            lcode = config.translation_locale.value
+            title.language = Language(lcode)
+        pref_title.replace_with(title)
+        pref_title.gallery = self
 
     @preferred_title.expression
     def preferred_title(cls):
-        raise NotImplementedError
         lcode = utils.get_language_code(config.translation_locale.value)
-        return select([Title]).where(Title.gallery_id == cls.id).where(Language.code == lcode).label("preffered_title")
+        j = Title.__table__.join(Language.__table__, Title.__table__.c.language_id == Language.__table__.c.id)
+        return select([Title]).select_from(j).where(Title.gallery_id == cls.id).where(
+            Language.code == lcode).label("preffered_title")
 
     @hybrid_method
     def title_by_language(self, language_code):
@@ -1302,40 +1709,36 @@ class Gallery(TaggableMixin, ProfileMixin, Base):
             if t.language and t.language.code == language_code:
                 return t
 
-    # def exists(self, obj=False, strict=False):
-    #    """Checks if gallery exists by path
-    #    Params:
-    #        obj -- queries for the full object and returns it
-    #    """
-    #    e = self
-    #    if not constants.db_session:
-    #        return e
-    #    g = self.__class__
-    #    if self.path:
-    #        head, tail = os.path.split(self.path)
-    #        p, ext = os.path.splitext(tail if tail else head)
-    #        sess = constants.db_session()
-    #        if self.in_archive:
-    #            head, tail = os.path.split(self.path_in_archive)
-    #            p_a = tail if tail else head
-    #            e = sess.query(
-    #                self.__class__.id).filter(
-    #                and_(
-    #                    g.path.ilike(
-    #                        "%{}%".format(p)), g.path_in_archive.ilike(
-    #                        "%{}%".format(p_a)))).scalar()
-    #        else:
-    #            e = sess.query(
-    #                self.__class__.id).filter(
-    #                and_(
-    #                    g.path.ilike(
-    #                        "%{}%".format(p)))).scalar()
-    #        sess.close()
-    #        if not obj:
-    #            e = e is not None
-    #    else:
-    #        log.w("Could not query for gallery existence because no path was set.")
-    #    return e
+    def get_sources(self):
+        ""
+        p_paths = []
+        if self.id:
+            ensure_in_session(self)
+            if self.gallery.single_source:
+                p_path = constants.db_session().query(Page.path).filter(Page.gallery_id == self.id,
+                                                                        Page.number == 1)
+                if p_path:
+                    p_paths.append(str(pathlib.Path(p_path).parent))
+            else:
+                raise NotImplementedError
+        return tuple(p_paths)
+
+    @classmethod
+    def exists_by_path(cls, path="", obj=False, case=True):
+        """Checks if gallery exists by path
+        """
+        assert path
+        path = Page.format_path(path)
+        e = False
+        s = constants.db_session()
+        with s.no_autoflush:
+            page_expr = Page.path.like if case else Page.path.ilike
+            page_expr = page_expr(path + '%')
+            if obj:
+                e = s.query(Gallery).join(Gallery.pages).filter(page_expr).first()
+            else:
+                e = bool(s.query(Page.id).filter(page_expr).count())
+            return e
 
 
 metatag_association(Gallery, "galleries")
@@ -1346,7 +1749,7 @@ url_association(Gallery, "galleries")
 @generic_repr
 class Page(TaggableMixin, ProfileMixin, Base):
     __tablename__ = 'page'
-    number = Column(Integer, nullable=False, default=-1)
+    number = Column(Integer, nullable=False, index=True, default=-1)
     name = Column(String, nullable=False, default='')
     path = Column(Text, nullable=False, default='')
     hash_id = Column(Integer, ForeignKey('hash.id'))
@@ -1354,8 +1757,16 @@ class Page(TaggableMixin, ProfileMixin, Base):
     in_archive = Column(Boolean, default=False)
     timestamp = Column(ArrowType, nullable=False, default=arrow.now)
 
-    hash = relationship("Hash", cascade="save-update, merge, refresh-expire")
+    hash = relationship("Hash", cascade=expunge_cascade)
     gallery = relationship("Gallery", back_populates="pages")
+
+    @validates('path')
+    def _validate_path(self, key, p):
+        return self.format_path(p)
+
+    @classmethod
+    def format_path(cls, path):
+        return str(pathlib.Path(path))
 
     @property
     def file_type(self):
@@ -1373,21 +1784,20 @@ class Page(TaggableMixin, ProfileMixin, Base):
         if not constants.db_session:
             return e
         sess = constants.db_session()
-        p = self.__class__
-        if self.path:
-            sess = constants.db_session()
-            e = sess.query(
-                p.id).filter(
-                and_(
-                    p.path.ilike(
-                        "%{}%".format(
-                            self.path)))).scalar()
-            sess.close()
-            if not obj:
-                e = e is not None
-        else:
-            log.w("Could not query for page existence because no path was set.")
-        return e
+        with sess.no_autoflush:
+            p = self.__class__
+            if self.path:
+                e = sess.query(
+                    p.id).filter(
+                    and_(
+                        p.path.like(
+                            "{}".format(
+                                self.path)))).scalar()
+                if not obj:
+                    e = e is not None
+            else:
+                log.w("Could not query for page existence because no path was set.")
+            return e
 
 
 metatag_association(Page, "pages")
@@ -1403,7 +1813,7 @@ class Title(AliasMixin, UserMixin, Base):
 
     language = relationship(
         "Language",
-        cascade="save-update, merge, refresh-expire")
+        cascade=expunge_cascade)
     gallery = relationship("Gallery", back_populates="titles")
 
     def __init__(self, **kwargs):
@@ -1516,11 +1926,14 @@ def initEvents(sess):
     many_to_many_deletion(Tag, lambda: Tag.namespaces)
     many_to_many_deletion(Namespace, lambda: Namespace.tags)
     many_to_many_deletion(Circle, lambda: Circle.artists)
-    many_to_many_deletion(AliasName, custom_filter=lambda: and_op(
-        not AliasName.alias_for,
-        ~AliasName.artists.any(),
-        ~AliasName.parodies.any()),
-        found_attrs=lambda: [AliasName.artists, AliasName.parodies])
+    many_to_many_deletion(ArtistName, custom_filter=lambda: and_op(
+        ArtistName.alias_for == None,  # noqa: E711
+        ~ArtistName.artists.any(),
+    ), found_attrs=lambda: [ArtistName.artists])
+    many_to_many_deletion(ParodyName, custom_filter=lambda: and_op(
+        ParodyName.alias_for == None,  # noqa: E711
+        ~ParodyName.parodies.any(),
+    ), found_attrs=lambda: [ParodyName.parodies])
     # TODO: clean up
     many_to_many_deletion(Profile, custom_filter=lambda: and_op(
         ~Profile.artists.any(),
@@ -1538,8 +1951,8 @@ def initEvents(sess):
         ~Url.galleries.any()),
         found_attrs=lambda: [Url.artists, Url.galleries])
     many_to_many_deletion(NamespaceTags, custom_filter=lambda: or_op(
-        NamespaceTags.tag is None,
-        NamespaceTags.namespace is None),
+        NamespaceTags.tag == None,  # noqa: E711
+        NamespaceTags.namespace == None),  # noqa: E711
         found_attrs=lambda: [NamespaceTags.tag, NamespaceTags.namespace])
 
 
@@ -1586,16 +1999,14 @@ def engine_connect(dbapi_connection, connection_record):
         cursor.close()
 
 
-def init_defaults(sess):
+def init_defaults(sess, first_time=True):
     "Initializes default items"
-
     # init default user
     duser = sess.query(User).filter(
         User.role == User.Role.default).one_or_none()
     if not duser:
         duser = User(name=constants.super_user_name, role=User.Role.default)
         sess.add(duser)
-        sess.commit()
     constants.default_user = duser
     # init default metatags
     for t in MetaTag.names:
@@ -1603,8 +2014,16 @@ def init_defaults(sess):
         if not t_d:
             t_d = MetaTag(name=t)
             sess.add(t_d)
-            sess.commit()
         MetaTag.tags[t] = t_d
+
+    # init status
+    if first_time:
+        for s in Status.names.values():
+            db_st = Status()
+            db_st.name = s
+            if not db_st.exists(session=sess):
+                sess.add(db_st)
+    sess.commit()
 
 
 def create_user(role, name=None, password=None):
@@ -1671,8 +2090,7 @@ def list_users(role=None, limit=100, offset=0):
 
 
 def check_db_version(sess):
-    """Checks if DB version is allowed.
-    Raises db exception if not"""
+    """Checks if DB version"""
     try:
         life = sess.query(Life).one_or_none()
     except (exc.NoSuchTableError, exc.OperationalError):
@@ -1681,7 +2099,8 @@ def check_db_version(sess):
             log.w(msg, stdout=True)
             return False
         else:
-            raise exceptions.DatabaseInitError("Invalid database. Death DB.")
+            raise exceptions.DatabaseInitError(
+                "Invalid database. Momo says she thinks this database is not HPX-compatible.")
     if life:
         if life.version != constants.version_db_str:
             if constants.preview:
@@ -1689,33 +2108,30 @@ def check_db_version(sess):
                 log.w(msg, stdout=True)
                 return False
             else:
-                msg = 'Found database version: {}\nSupported database versions:{}'.format(
+                msg = 'Found database version {}. Your database has been upgraded/downgraded to version {}.'.format(
                     life.version, constants.version_db_str)
-                log.c("Incompatible database version")
-                log.d(msg)
-            raise exceptions.DatabaseVersionError(msg)
+                log.i(msg, stdout=True)
     else:
         life = Life()
         sess.add(life)
         life.version = constants.version_db_str
         life.times_opened = 0
-        sess.commit()
 
     db_key = "db_usage"
 
     life.times_opened += 1
 
-    with utils.intertnal_db() as idb:
-        if db_key not in idb or idb[db_key] + 1 != life.times_opened:
-            constants.is_new_db = True
-            constants.invalidator.similar_gallery = True
-        idb[db_key] = life.times_opened
+    idb = constants.internaldb
+    if db_key not in idb or idb[db_key] + 1 != life.times_opened:
+        constants.is_new_db = True
+        constants.invalidator.similar_gallery = True
+    idb[db_key] = life.times_opened
 
-    sess.add(Event(Event.Action.app_start, life))
-    init_defaults(sess)
-    sess.commit()
-    log.d("Succesfully initiated database")
     log.d("Using DB Version: {}".format(life.version))
+
+    init_defaults(sess, life.times_opened == 1)
+    log.d("Succesfully initiated database")
+    sess.commit()
     return True
 
 
@@ -1726,14 +2142,17 @@ def _get_session(sess):
 
 def _get_current():
     if not utils.in_cpubound_thread() and constants.server_started:
-        return gevent.getcurrent()
+        l_obj = gevent.getcurrent()
     else:
-        return threading.local()
+        l_obj = threading.current_thread()
+    return l_obj
 
 
-def make_db_url(db_name=None):
+def make_db_url(db_name=None, dev_db=None):
+    if dev_db is None:
+        dev_db = constants.dev_db
     if db_name is None:
-        db_name = constants.db_name_dev if constants.dev and config.db_name.value == constants.db_name else config.db_name.value
+        db_name = constants.db_name_dev if dev_db and config.db_name.value == constants.db_name else config.db_name.value
     db_query = {}
     if config.dialect.value == constants.Dialect.MYSQL:
         db_query.update({'charset': 'utf8mb4'})
@@ -1741,16 +2160,40 @@ def make_db_url(db_name=None):
     drivername = config.dialect.value
     if drivername == constants.Dialect.MYSQL:
         drivername += '+pymysql'
-    db_url = URL(
-        drivername,
-        username=config.db_username.value,
-        password=config.db_password.value,
-        host=config.db_host.value,
-        port=config.db_port.value,
-        database=db_name,
-        query=db_query,
-    )
+
+    if drivername == constants.Dialect.SQLITE:
+        db_url = sa_make_url(os.path.join("sqlite:///", constants.db_path_dev if dev_db else constants.db_path))
+    else:
+        db_url = URL(
+            drivername,
+            username=config.db_username.value,
+            password=config.db_password.value,
+            host=config.db_host.value,
+            port=config.db_port.value,
+            database=db_name,
+            query=db_query,
+        )
     return db_url
+
+
+def migrate():
+    if hasattr(sys, "_called_from_test"):
+        return
+    log.i("Checking for database update", stdout=True)
+    a_cfg = alembic.config.Config(constants.migration_config_path)
+    a_cfg.attributes['configure_logger'] = False
+    script = alembic.script.ScriptDirectory.from_config(a_cfg)
+    ctx = alembic.migration.MigrationContext.configure(constants.db_engine.connect())
+    log.d("Database BASE revision:", tuple(script.get_bases()))
+    current_rev = tuple(ctx.get_current_heads())
+    head_rev = tuple(script.get_heads())
+    log.d("Database current revision:", current_rev)
+    log.d("Database HEAD revision:", head_rev)
+    if current_rev != head_rev:
+        log.i("Database update found. Updating...", stdout=True)
+    alembic.command.upgrade(a_cfg, "head")
+    if current_rev != head_rev:
+        log.i("Database has been updated!", stdout=True)
 
 
 def init(**kwargs):
@@ -1768,7 +2211,8 @@ def init(**kwargs):
         if not constants.db_engine:
             if config.dialect.value == constants.Dialect.SQLITE:
                 constants.db_engine = create_engine(os.path.join("sqlite:///", db_path),
-                                                    connect_args={'timeout': config.sqlite_database_timeout.value})  # SQLITE specific arg (avoding db is locked errors)
+                                                    connect_args={'timeout': config.sqlite_database_timeout.value,
+                                                                  'check_same_thread': False})
             else:
                 db_url = make_db_url()
                 if not database_exists(db_url):
@@ -1778,6 +2222,8 @@ def init(**kwargs):
                                                     pool_timeout=config.pool_timeout.value)
 
         Base.metadata.create_all(constants.db_engine)
+
+        migrate()
 
         Session.configure(bind=constants.db_engine)
     except exc.OperationalError as e:
@@ -1801,40 +2247,67 @@ def add_bulk(session, objects, amount=100, flush=False, bulk_save=False, return_
         left = objects[:amount]
 
 
-def table_attribs(model, id=False, descriptors=False):
+def table_attribs(model, id=False, descriptors=False, raise_err=True, exclude=tuple(), allow=tuple()):
     """Returns a dict of table column names and their SQLAlchemy value objects
     Params:
         id -- retrieve id columns instead of the sqlalchemy object (to avoid a db query etc.)
         descriptors -- include hybrid attributes and association proxies
     """
-    assert isinstance(model, Base) or issubclass(model, Base)
+    assert isinstance(model, Base) or issubclass(model, Base), f"{model}"
+    exclude = tuple(exclude)
     d = {}
-
     obj = model
     in_obj = inspect(model)
     if isinstance(in_obj, state.InstanceState):
-        model = type(model)
-        attr = list(in_obj.attrs)
+        sess = object_session(model)
+        model = type(obj)
+        with no_autoflush(sess):
+            attr = list(in_obj.attrs)
 
-        exclude = [y.key for y in attr if y.key.endswith('_id')]
-        if id:
-            exclude = [x[:-3] for x in exclude]  # -3 for '_id'
+            if id is None:
+                ex = tuple()
+            else:
+                ex = tuple(y.key for y in attr if y.key.endswith('_id') and y.key[:-3] not in allow)
+                if id:
+                    ex = tuple(x[:-3] for x in ex)  # -3 for '_id'
 
-        for x in attr:
-            if x.key not in exclude:
-                d[x.key] = x.value
+            exclude += ex
+
+            for x in attr:
+                if x.key not in exclude:
+                    try:
+                        d[x.key] = x.value
+                    except exc_orm.DetachedInstanceError:
+                        if raise_err:
+                            raise
+                        d[x.key] = None
     else:
         for name in model.__dict__:
+            if name in exclude:
+                continue
             value = model.__dict__[name]
             if isinstance(value, attributes.InstrumentedAttribute):
                 d[name] = value
 
     if descriptors:
         for name, value in model.__dict__.items():
-            if isinstance(value, (hybrid_property, AssociationProxy, index_property)):
-                d[name] = getattr(obj, name)
-
+            if name not in exclude and isinstance(value, (hybrid_property, AssociationProxy, index_property)):
+                try:
+                    if pyinspect.isclass(obj):
+                        d[name] = value
+                    else:
+                        d[name] = getattr(obj, name)
+                except exc_orm.DetachedInstanceError:
+                    if raise_err:
+                        raise
+                    d[name] = None
     return d
+
+
+def is_detached(obj):
+    "Check if obj was expunged from a session"
+    if is_instanced(obj):
+        return inspect(obj).detached
 
 
 def is_instanced(obj):
@@ -1844,13 +2317,40 @@ def is_instanced(obj):
     return False
 
 
-def is_list(obj):
+def is_descriptor(obj):
+    "Check if db object is a descriptor"
+    if isinstance(obj, (hybrid_property, AssociationProxy, index_property)):
+        return True
+    return False
+
+
+def descriptor_has_getter(obj):
+    "Check if db object is descriptor has a getter"
+    assert is_descriptor(obj) and not isinstance(obj, AssociationProxy)
+    return True if obj.fget else False
+
+
+def descriptor_has_setter(obj):
+    "Check if db object is descriptor has a setter"
+    assert is_descriptor(obj) and not isinstance(obj, AssociationProxy)
+    return True if obj.fset else False
+
+
+def is_list(obj, strict=False):
     "Check if db object is a db list"
+    if not strict and isinstance(obj, attributes.InstrumentedAttribute):
+        if isinstance(obj.property, properties.RelationshipProperty):
+            if obj.property.uselist and obj.property.lazy not in ('dynamic',):
+                return True
     return isinstance(obj, collections.InstrumentedList)
 
 
-def is_query(obj):
+def is_query(obj, strict=False):
     "Check if db object is a dynamic query object (issued by lazy='dynamic')"
+    if not strict and isinstance(obj, attributes.InstrumentedAttribute):
+        if isinstance(obj.property, properties.RelationshipProperty):
+            if obj.property.lazy in ('dynamic',):
+                return True
     return isinstance(obj, dynamic.AppenderQuery)
 
 
@@ -1878,7 +2378,10 @@ def relationship_column(objA, objB):
 
 def column_model(obj):
     "Return model class for given model attribute/column"
-    return get_type(obj)
+    try:
+        return get_type(obj)
+    except TypeError:
+        raise TypeError(f"Couldn't inspect type: {obj}")
 
 
 def column_name(obj):
@@ -1892,13 +2395,37 @@ def model_name(model):
     return model.__name__
 
 
-def ensure_in_session(item):
+def ensure_in_session(item, session=None):
+    """
+    Ensures item is in a session, returns item
+    """
     if not object_session(item):
         try:
-            constants.db_session().add(item)
+            session = session or constants.db_session()
+            session.add(item)
             return item
         except exc.InvalidRequestError:
             return constants.db_session().merge(item)
+    return item
+
+
+def freeze_object(obj):
+    if is_instanced(obj):
+        sess = object_session(obj)
+        if sess:
+            with sess.no_autoflush:
+                for t, v in table_attribs(obj, descriptors=True, raise_err=False).items():
+                    if is_instanced(v):
+                        freeze_object(v)
+                    elif is_list(v):
+                        for x in v:
+                            freeze_object(v)
+                try:
+                    sess.refresh(obj)
+                except exc.InvalidRequestError:
+                    pass
+                sess.expunge(obj)
+    return obj
 
 
 @contextmanager
@@ -1933,3 +2460,15 @@ def cleanup_session_wrap(f=None):
             with cleanup_session():
                 return f(*args, **kwargs)
         return wrapper
+
+
+@contextmanager
+def no_autoflush(sess=None):
+    if sess:
+        o = sess.autoflush
+        sess.autoflush = False
+    try:
+        yield sess
+    finally:
+        if sess:
+            sess.autoflush = o
