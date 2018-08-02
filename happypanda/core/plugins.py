@@ -20,7 +20,7 @@ from logging.handlers import RotatingFileHandler
 from contextlib import contextmanager
 
 from happypanda.interface import enums
-from happypanda.common import exceptions, constants, hlogger, config
+from happypanda.common import exceptions, constants, hlogger, config, utils
 from happypanda.core import plugin_interface, async_utils
 
 log = hlogger.Logger(constants.log_ns_plugin + __name__)
@@ -359,7 +359,8 @@ class HandlerValue:
         if not self.default_handler:
             return self._raise_default_error() if error else None
         log.d(f"Calling default handler for '{self.name}'")
-        return self.default_handler(*self.args, **self.kwargs)
+        r = self.default_handler(*self.args, **self.kwargs)
+        return self._ensure_type(r)
 
     def default_capture(self, token, idx, error=True):
         "Calls the default capture handler"
@@ -369,13 +370,22 @@ class HandlerValue:
         if token_handler_d:
             r = []
             if idx is not None:
-                return token_handler_d[0](*self.args, **self.kwargs)
+                return self._ensure_type(token_handler_d[0](*self.args, **self.kwargs))
             else:
                 for y in token_handler_d:
-                    r.append(y(*self.args, **self.kwargs))
+                    r.append(self._ensure_type(y(*self.args, **self.kwargs)))
             return tuple(r)
         else:
             return self._raise_default_error() if error else None
+
+    def _ensure_type(self, r):
+        if self.expected_type is not None:
+            if not isinstance(r, self.expected_type):
+                raise exceptions.CoreError(
+                    utils.this_function(),
+                    "Command handler '{}' expected type '{}', but got '{}' by default handler [token={}]".format(
+                        self.name, self.expected_type, str(type(r)), self.capture_token))
+        return r
 
     def all(self, default=False):
         "Calls all handlers, returns tuple"
@@ -515,7 +525,7 @@ class HandlerValue:
                 return self._call_handler(*token_handler[idx])
             else:
                 for y in token_handler:
-                    with self._unhandled_exception(y[0]) as err: # noqa: F841
+                    with self._unhandled_exception(y[0]) as err:  # noqa: F841
                         r.append(self._call_handler(*y))
 
         if token_handler_d and default:
@@ -576,16 +586,18 @@ class HandlerValue:
         try:
             yield err_info
         except Exception as e:
-            if isinstance(e, exceptions.CoreError) and e.where == self.name + 'handler':
+            if node is None or (isinstance(e, exceptions.CoreError) and e.where == self.name + 'handler'):
                 raise
-            self.failed[node] = e
-            node.logger.exception(
-                f"An unhandled exception '{e.__class__.__name__}' was raised by plugin handler on command '{self.name}'".format(
-                    self.name))
-            get_plugin_context_logger(
-                node.logger.name).w(
-                f"An unhandled exception '{e.__class__.__name__}' was raised by plugin handler on command '{self.name}' by",
-                node.format())
+            if node:
+                self.failed[node] = e
+                node.logger.exception(
+                    f"An unhandled exception '{e.__class__.__name__}' was raised by plugin handler on command '{self.name}'".format(
+                        self.name))
+                get_plugin_context_logger(
+                    node.logger.name).w(
+                    f"An unhandled exception '{e.__class__.__name__}' was raised by plugin handler on command '{self.name}' by",
+                    node.format())
+
             err_info.raised_error = True
             err_info.exception = e
 
@@ -597,7 +609,7 @@ class HandlerValue:
                 raise exceptions.PluginHandlerError(
                     node,
                     "Command handler '{}' expected type '{}', but got '{}' by plugin '{}'".format(
-                        self.name, str(type(self.expected_type)), str(type(r)), node.format()))
+                        self.name, self.expected_type, str(type(r)), node.format()))
         return r
 
 
@@ -623,17 +635,16 @@ class PluginNode:
         self.logger.info("Initiating plugin")
         self._isolate = PluginIsolate(self)
         err = None
-        entry_file = os.path.join(self.info.path, self.info.entry)
-        with open(entry_file) as f:
-            try:
-                with self._isolate as i:
-                    exec(f.read(), i.plugin_globals)
-            except Exception as e:
-                err = e
-                self.logger.exception(
-                    f"An unhandled exception '{e.__class__.__name__}' was raised during plugin initialization")
-                get_plugin_context_logger(self.logger.name).w(
-                    "An unhandled exception was raised during plugin initialization by {}: {}: {}".format(self.format(), e.__class__.__name__, str(e)))
+        entry_file = os.path.splitext(self.info.entry)[0]
+        try:
+            with self._isolate as i:
+                exec(f"import {entry_file}", i.plugin_globals)
+        except Exception as e:
+            err = e
+            self.logger.exception(
+                f"An unhandled exception '{e.__class__.__name__}' was raised during plugin initialization")
+            get_plugin_context_logger(self.logger.name).w(
+                "An unhandled exception was raised during plugin initialization by {}: {}: {}".format(self.format(), e.__class__.__name__, str(e)))
 
         return False if err else True
 

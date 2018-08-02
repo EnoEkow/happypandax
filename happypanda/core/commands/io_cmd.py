@@ -15,14 +15,20 @@ import attr
 import subprocess
 import imghdr
 import errno
+import typing
+import regex
+import langcodes
+import weakref
 
 from io import BytesIO
 from PIL import Image
 from zipfile import ZipFile
 from rarfile import RarFile
 from tarfile import TarFile
-from contextlib import contextmanager
 from gevent import fileobject
+from natsort import natsorted
+from ordered_set import OrderedSet
+from cachetools.func import ttl_cache
 
 from happypanda.common import hlogger, exceptions, utils, constants
 from happypanda.core.command import CoreCommand, CommandEntry, AsyncCommand, Command, CParam
@@ -119,24 +125,23 @@ class ImageItem(AsyncCommand):
         self.set_progress(1)
         size = self.properties.size
         fs = None
-        if isinstance(self._image, str):
+        if isinstance(self._image, (str, CoreFS)):
             fs = CoreFS(self._image)
             if not fs.exists:
                 log.d("Image file does not exists")
                 return ""
-            self._image = fs.get()
+        fs_bytes = None
         im = None
         image_path = ""
         try:
-            if isinstance(self._image, str):
-                _, ext = os.path.splitext(self._image)
-                if self._retrying:
-                    ext = '.' + imghdr.what(self._image)
+            if isinstance(self._image, (str, CoreFS)):
+                fs_bytes = fs.open("rb")
+                _, ext = os.path.splitext(fs.path)
+                if self._retrying and not fs.archive_type:
+                    ext = '.' + imghdr.what(None, h=fs_bytes)
             else:
-                ext = '.' + imghdr.what("", self._image)
-
-            im = Image.open(self._image)
-            im = self._convert(im, img_ext=ext)
+                fs_bytes = self._image
+                ext = '.' + imghdr.what(None, h=fs_bytes)
 
             if self.properties.output_path:
                 image_path = self.properties.output_path
@@ -157,24 +162,23 @@ class ImageItem(AsyncCommand):
 
             save_image = True
             if size.width and size.height:
+                im = Image.open(fs_bytes)
+                im = self._convert(im, img_ext=ext)
+
                 if ext.lower().endswith(".gif"):
                     new_frame = Image.new('RGBA', im.size)
                     new_frame.paste(im, (0, 0), im.convert('RGBA'))
                     im.close()
                     im = new_frame
                 im.thumbnail((size.width, size.height), Image.ANTIALIAS)
-
             else:
                 if self.properties.create_symlink and isinstance(image_path, str):
-                    if fs and fs.inside_archive:
-                        pathlib.Path(self._image).rename(image_path)
-                    else:
-                        image_path = image_path + constants.link_ext
-                        with open(image_path, 'w', encoding='utf-8') as f:
-                            f.write(self._image)
+                    image_path = image_path + constants.link_ext
+                    with open(image_path, 'w', encoding='utf-8') as f:
+                        f.write(fs.path)
                     save_image = False
 
-            if save_image:
+            if save_image and im:
                 im.save(image_path)
         except (OSError, KeyError) as e:
             if not self._retrying:
@@ -188,6 +192,8 @@ class ImageItem(AsyncCommand):
         finally:
             if im:
                 im.close()
+            if fs_bytes:
+                fs_bytes.close()
         log.d("Generated image path:", image_path)
         return image_path
 
@@ -250,6 +256,29 @@ class CoreFS(CoreCommand):
                                          a tuple of image formats
                                          """)
 
+    class _File:
+        def __init__(self, corefs, mode="r", *args, **kwargs):
+            self.corefs = corefs
+            self.args = (mode, *args)
+            self.kwargs = kwargs
+            self.fp = self.corefs._open(*self.args, **self.kwargs)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            if self.fp:
+                self.fp.close()
+
+        def __getattr__(self, key):
+            return getattr(self.fp, key)
+
+        def __getitem__(self, item):
+            return self.fp.__getitem__(item)
+
+        def __setitem__(self, key, value):
+            return self.fp.__setitem__(key, value)
+
     def __init__(self, path: str=pathlib.Path(), archive=None):
         assert isinstance(path, (pathlib.Path, str, CoreFS))
         assert isinstance(archive, Archive) or archive is None
@@ -259,6 +288,9 @@ class CoreFS(CoreCommand):
         self._filetype = None
         self._archive = archive
         self._extacted_file = None
+        self._ext = None
+        if isinstance(path, str) and utils.is_url(path, strict=True):
+            raise NotImplementedError("URLs are not supported yet")
         self._resolve_path(path)
 
     @_archive_formats.default()
@@ -271,6 +303,7 @@ class CoreFS(CoreCommand):
         return (CoreFS.JPG, CoreFS.JPEG, CoreFS.BMP, CoreFS.PNG, CoreFS.GIF)
 
     @classmethod
+    @ttl_cache()
     def archive_formats(cls):
         "Get supported archive formats"
         cls._get_commands()
@@ -281,6 +314,7 @@ class CoreFS(CoreCommand):
             return tuple(formats)
 
     @classmethod
+    @ttl_cache()
     def image_formats(cls):
         "Get supported image formats"
         cls._get_commands()
@@ -329,6 +363,11 @@ class CoreFS(CoreCommand):
         return ""
 
     @property
+    def parent(self):
+        "Get path to parent folder or file as string"
+        return str(self._path.parent)
+
+    @property
     def is_file(self):
         "Check if path is pointed to a file"
         return not self.is_dir
@@ -350,17 +389,27 @@ class CoreFS(CoreCommand):
         return False
 
     @property
+    def archive_type(self):
+        "Return the archive ext if this file is an archive or is inside one"
+        suffixes = self._path.suffixes
+        while suffixes:
+            s = "".join(suffixes)
+            if s.lower() in self.archive_formats():
+                return s.lower()
+        return None
+
+    @property
     def inside_archive(self):
         "Check if path is pointed to an object inside an archive"
-        log.d("Checking if path is inside archive", self._path)
+        #log.d("Checking if path is inside archive", self._path)
         parts = list(self._path.parents)
 
         while parts:
             p = parts.pop()
             if p.is_file() and p.suffix.lower() in self.archive_formats():
-                log.d("Path is inside an archive", self._path)
+                #log.d("Path is inside an archive", self._path)
                 return True
-        log.d("Path is not inside an archive", self._path)
+        #log.d("Path is not inside an archive", self._path)
         return False
 
     @property
@@ -376,7 +425,7 @@ class CoreFS(CoreCommand):
         try:
             if self.inside_archive:
                 self._init_archive()
-                log.d("Checking for archive path", self.archive_name, "in archive", self.path)
+                #log.d("Checking for archive path", self.archive_name, "in archive", self.path)
                 return self.archive_name in self._archive.namelist()
             else:
                 return self._path.exists()
@@ -388,6 +437,8 @@ class CoreFS(CoreCommand):
     @property
     def ext(self):
         "Get file extension. An empty string is returned if path is a directory"
+        if self._ext is not None:
+            return self._ext
         suffixes = self._path.suffixes
         while suffixes:
             s = "".join(suffixes)
@@ -397,7 +448,8 @@ class CoreFS(CoreCommand):
         else:
             s = self._path.suffix
 
-        return s.lower()
+        self._ext = s.lower()
+        return self._ext
 
     @property
     def count(self):
@@ -405,8 +457,8 @@ class CoreFS(CoreCommand):
         raise NotImplementedError
         return self._path.suffix.lower()
 
-    def contents(self, corefs=True):
-        "If this is an archive or folder, return a tuple of CoreFS objects else return None"
+    def contents(self, corefs=True) -> typing.Tuple[typing.Union[str, object]]:
+        "If this is an archive or folder, return a tuple of CoreFS/str objects"
         if self.is_archive:
             self._init_archive()
             root = self._archive.path_separator.join(self._path.parts)
@@ -415,9 +467,9 @@ class CoreFS(CoreCommand):
             if self.inside_archive:
                 raise NotImplementedError
             else:
-                l = tuple(x for x in self._path.iterdir())
+                l = tuple(str(x) for x in self._path.iterdir())
         if corefs:
-            l = tuple(CoreFS(x) for x in l)
+            l = tuple(CoreFS(x, archive=self._archive) for x in l)
         return l
 
     def get(self, target=None):
@@ -448,22 +500,23 @@ class CoreFS(CoreCommand):
             else:
                 raise
 
-    @contextmanager  # TODO: Make usable without contextmanager too
-    def open(self, *args, **kwargs):
+    def _open(self, mode="r", *args, **kwargs):
         ""
         try:
             if self.inside_archive:
                 self._init_archive()
-                f = self._archive.open(self.archive_name, *args, **kwargs)
+                f = self._archive.open(self.archive_name, mode, *args, **kwargs)
             else:
-                f = open(self.get(), *args, **kwargs)
+                f = open(self.get(), mode, *args, **kwargs)
             f = fileobject.FileObjectThread(f, mode=f.mode)
         except PermissionError:
             if self.is_dir:
                 raise exceptions.CoreError(utils.this_function(), "Tried to open a folder which is not possible")
             raise
-        yield f
-        f.close()
+        return f
+
+    def open(self, mode="r", *args, **kwargs):
+        return self._File(self, mode, *args, **kwargs)
 
     @staticmethod
     def open_with_default(path):
@@ -500,6 +553,7 @@ class CoreFS(CoreCommand):
         if self._archive:
 
             if not target:
+                constants.task_command.temp_cleaner.wake_up()
                 target = pathlib.Path(utils.create_temp_dir().name)
 
             if filename:
@@ -540,7 +594,7 @@ class CoreFS(CoreCommand):
         return super().__lt__(other)
 
     def __str__(self):
-        return "CoreFS({})".format(self.path)
+        return self.path
 
     def __repr__(self):
         return "CoreFS({})".format(self.path)
@@ -637,7 +691,7 @@ class Archive(CoreCommand):
                                      "additional keyword-arguments to pass when opening the file (like ``encoding='utf-8'``, etc.)"),
                                  __capture=(str, "file extension"),
                                  __doc="""
-                                Called to open a file inside the archive.
+                                Called to open a file inside the archive. Please note that mode='r' refers to binary mode
                                 """,
                                  __doc_return="""
                                 a file-like object
@@ -650,6 +704,9 @@ class Archive(CoreCommand):
                                 Called to close the underlying archive object
                                 """)
 
+    _archive_cache = weakref.WeakValueDictionary()
+    _archive_obj_ref_count = {}
+
     def _def_formats():
         return (CoreFS.ZIP, CoreFS.RAR, CoreFS.CBZ, CoreFS.CBR, CoreFS.TARBZ2,
                 CoreFS.TARGZ, CoreFS.TARXZ)
@@ -660,28 +717,40 @@ class Archive(CoreCommand):
         self._path = pathlib.Path(fpath)
         self._pathfs = CoreFS(fpath)
         self._ext = self._pathfs.ext
-        if not self._path.exists():
-            raise exceptions.ArchiveExistError(str(self._path))
-        if self._pathfs.ext not in CoreFS.archive_formats():
-            raise exceptions.ArchiveUnsupportedError(str(self._path))
+        self.path_separator = '/'
 
-        try:
-            with self._init.call_capture(self._ext, self._path) as plg:
-                self._archive = plg.first_or_none(True)
+        a = self._archive_cache.get(self._pathfs.path, False)
+        if a:
+            self._archive = a._archive
+            self._opened = a._opened
+            self.path_separator = self.path_separator
+            self._archive_obj_ref_count.setdefault(self._archive, 0)
+            self._archive_obj_ref_count[self._archive] += 1
+        else:
+            if not self._path.exists():
+                raise exceptions.ArchiveExistError(str(self._path))
+            if self._pathfs.ext not in CoreFS.archive_formats():
+                raise exceptions.ArchiveUnsupportedError(str(self._path))
 
-            if not self._archive:
-                raise exceptions.CoreError(
-                    utils.this_function(),
-                    "No valid archive handler found for this archive type: '{}'".format(
-                        self._ext))
+            try:
+                with self._init.call_capture(self._ext, self._path) as plg:
+                    self._archive = plg.first_or_none(True)
 
-            with self._path_sep.call_capture(self._ext, self._archive) as plg:
-                p = plg.first_or_none(True)
-                self.path_separator = p if p else '/'
-        except BaseException:
-            if self._archive:
-                self.close()
-            raise
+                if not self._archive:
+                    raise exceptions.CoreError(
+                        utils.this_function(),
+                        "No valid archive handler found for this archive type: '{}'".format(
+                            self._ext))
+
+                with self._path_sep.call_capture(self._ext, self._archive) as plg:
+                    p = plg.first_or_none(True)
+                    self.path_separator = p if p else self.path_separator
+            except BaseException:
+                if self._archive:
+                    self.close()
+                raise
+
+            self._archive_cache[self._pathfs.path] = self
 
     def __del__(self):
         if hasattr(self, '_archive') and self._archive:
@@ -833,18 +902,32 @@ class Archive(CoreCommand):
         Open file in archive, returns a file-like object.
         """
         filename = self._normalize_filename(filename)
-        with self._open.call_capture(self._ext, self._archive, filename, args, kwargs) as plg:
+        try:
+            mode = args[0]
+        except IndexError:
+            mode = "r"
+        args = list(args)
+        if mode == "rb":
+            args[0] = "r"
+        with self._open.call_capture(self._ext, self._archive, filename, tuple(args), kwargs) as plg:
             r = plg.first_or_default()
             if not hasattr(r, 'read') or not hasattr(r, 'write'):
                 raise exceptions.PluginHandlerError(plg.get_node(0), "Expected a file-like object from archive.open")
+            self._opened = True
             return r
 
-    def close(self):
+    def close(self, force=False):
         """
         Close archive, releases all open resources
         """
-        with self._close.call_capture(self._ext, self._archive) as plg:
-            plg.first_or_default()
+        refs = self._archive_obj_ref_count.get(self._archive, False)
+        if not refs or force:
+            with self._close.call_capture(self._ext, self._archive) as plg:
+                plg.first_or_default()
+            self._opened = False
+            self._archive_obj_ref_count.pop(self._archive, False)
+        else:
+            self._archive_obj_ref_count[self._archive] += 1
 
 
 class GalleryFS(CoreCommand):
@@ -854,83 +937,523 @@ class GalleryFS(CoreCommand):
         path_or_dbitem: path to a valid gallery archive/folder or a :class:`.db.Gallery` database item
     """
 
-    def __init__(self, path_or_dbitem: str):
-        assert isinstance(path_or_dbitem, (str, CoreFS, db.Gallery, pathlib.Path))
+    _evaluate: bool = CommandEntry("evaluate",
+                                   CParam("path", str, "path to gallery"),
+                                   __doc="""
+                                Called to evaluate if path is a valid gallery or not
+                                """,
+                                   __doc_return="""
+                                a bool indicating whether path is pointing to a valid gallery or not
+                                """)
 
-        self.gallery = None
+    _filter_pages: tuple = CommandEntry("filter_pages",
+                                        CParam("pages", tuple, "a tuple of pages"),
+                                        __doc="""
+                                Called to filter out files not to be regarded as pages
+                                """,
+                                        __doc_return="""
+                                a tuple of strings of all the pages that should NOT be included in the gallery
+                                """)
+
+    _parse_metadata_file: bool = CommandEntry("parse_metadata_file",
+                                              CParam(
+                                                  "path", str, "path to the gallery source, note that this can also be inside of an archive"),
+                                              CParam("gallery", db.Gallery, "gallery db item"),
+                                              __doc="""
+                                Called to read and apply metadata from an identified metadata file accompanying a gallery
+                                """,
+                                              __doc_return="""
+                                a bool indicating whether a file was identified and data was applied
+                                """)
+
+    def __init__(self, path_or_dbitem: typing.Union[db.Gallery, str, CoreFS, pathlib.Path]):
+        assert isinstance(path_or_dbitem, (str, CoreFS, db.Gallery, pathlib.Path))
         self.path = None
-        self.name = ''
-        self.title = ''
-        self.artists = []
-        self.language = ''
-        self.convention = ''
-        self.pages = {}  # number : CoreFS
 
         if isinstance(path_or_dbitem, db.Gallery):
             self.gallery = path_or_dbitem
         else:
+            self.gallery = db.Gallery()
             self.path = CoreFS(path_or_dbitem)
 
-    # def load(self):
-    #    "Extracts gallery data"
-    #    _, self.name = os.path.split(self.path)
-    #    info = GalleryScan.name_parser(self.path)
-    #    self.title = info['title']
-    #    self.artists.append(info['artist'])
-    #    self.language = info['language']
-    #    self.convention = info['convention']
-    #    if self.gallery_type == utils.PathType.Directoy:
-    #        self.pages = self._get_folder_pages()
-    #    elif self.gallery_type == utils.PathType.Archive:
-    #        self.pages = self._get_archive_pages()
-    #    else:
-    #        assert False, "this shouldnt happen... ({})".format(self.path)
+        self.pages = {}  # number : db.Page
+        self.metadata_from_file = False
+        self.exists = None
+        self._sources = None
+        self._evaluated = None
+        self._loaded_metadata = False
+        self._loaded_pages = False
 
-    def get_gallery(self):
-        "Creates/Updates database gallery"
-        if not self.gallery:
-            self.gallery = db.Gallery()
+    def load_all(self, update=True, delete_existing=False, force=False):
+        if self.evaluate(True):
+            self.load_metadata(update=update, force=force)
+            self.load_pages(delete_existing=delete_existing, force=force)
 
-        t = db.Title(name=self.title)
-        # TODO: add language to title
-        for x in self.gallery.titles:
-            if x.name == t.name:
-                t = x
-                break
-        self.gallery.titles.append(t)
-        [self.gallery.artists.append(
-            db.Artist(name=x).exists(True, True)) for x in self.artists]
-        db_pages = self.gallery.pages.count()
-        if db_pages != len(self.pages):
-            if db_pages:
-                self.gallery.pages.delete()
-            [self.gallery.pages.append(
-                db.Page(path=x[1], number=x[0])) for x in self.pages]
+    def load_metadata(self, update=True, force=False):
+        """
+        """
+        if self._loaded_metadata and not force:
+            return
+        sources = self.get_sources(only_single=True)
+        sess = constants.db_session()
+        with sess.no_autoflush:
+            if not update and self.gallery.id:
+                self.gallery = db.ensure_in_session(self.gallery)
+            if not update:
+                self.gallery.titles.clear()
+            for p in sources:
+                with self._parse_metadata_file.call(p, self.gallery) as plg:
+                    # TODO: stop at first handler that returns true
+                    self.metadata_from_file = any(plg.all(default=True))
 
+                n = NameParser(os.path.split(p)[1])
+                langs = []
+                for l in n.extract_language():
+                    langs.append(db.Language.as_unique(name=l, session=sess))
+
+                lang = None
+                if langs:
+                    lang = langs[0]
+                if lang and not self.gallery.language:
+                    self.gallery.language = lang
+                if not self.gallery.titles or not self.metadata_from_file:
+                    for t in n.extract_title():
+                        dbtitle = db.Title()
+                        dbtitle.name = t
+                        if lang:
+                            dbtitle.language = lang
+                        self.gallery.titles.append(dbtitle)
+                circles = []
+                for t in n.extract_circle():
+                    circles.append(db.Circle.as_unique(name=t, session=sess))
+
+                if not self.gallery.artists or not self.metadata_from_file:
+                    for t in n.extract_artist():
+                        dbartist = db.Artist.as_unique(name=t)
+                        for an in dbartist.names:
+                            if an.name == t:
+                                dbartistname = an
+                                break
+                        else:
+                            dbartistname = None
+
+                        if dbartist not in self.gallery.artists:
+                            self.gallery.artists.append(dbartist)
+
+                        if lang and dbartistname and not dbartistname.language:
+                            dbartistname.language = lang
+
+                for a in self.gallery.artists:
+                    if not a.circles or not self.metadata_from_file:
+                        for c in circles:
+                            if c not in a.circles:
+                                a.circles.append(c)
+
+                if not self.gallery.collections.count() or not self.metadata_from_file:
+                    for col_name, cat_name in n.extract_collection():
+                        dbcollection = db.Collection.as_unique(name=col_name, session=sess)
+                        if cat_name:
+                            dbcat = db.Category.as_unique(name=cat_name, session=sess)
+                            dbcollection.category = dbcat
+                        if dbcollection not in self.gallery.collections:
+                            self.gallery.collections.append(dbcollection)
+
+        self._loaded_metadata = True
+
+    def load_pages(self, delete_existing=False, force=False):
+        """
+        """
+        if self._loaded_pages and not force:
+            return
+        if self.evaluate(raise_error=True):
+            sess = constants.db_session()
+            with sess.no_autoflush:
+                if delete_existing:
+                    raise NotImplementedError
+                    self.pages.clear()
+                    if self.gallery.id:
+                        self.gallery = db.ensure_in_session(self.gallery)
+                        self.gallery.pages.delete()  # Can't call delete() when order_by has been applied
+
+                n = 0
+                for s in sorted(self.get_sources()):
+                    fs = CoreFS(s)
+                    c = tuple(x for x in fs.contents(corefs=False) if x.lower().endswith(CoreFS.image_formats()))
+                    real_pages = OrderedSet(c)
+
+                    with self._filter_pages.call(c) as plg:
+                        for x in plg.all():
+                            real_pages.difference_update(x)
+
+                    for p in natsorted(real_pages):
+                        n += 1
+                        dbpage = db.Page()
+                        dbpage.name = os.path.split(p)[1]
+                        dbpage.path = p
+                        dbpage.number = n
+                        self.gallery.pages.append(dbpage, enable_count_cache=True)
+                        self.pages[n] = p
+            self._loaded_pages = True
+
+    def evaluate(self, raise_error=False):
+        """
+        """
+        if self._evaluated is not None:
+            return self._evaluated
+
+        r = False
+
+        for s in self.get_sources():
+            sfs = CoreFS(s)
+            if sfs.is_dir or (sfs.is_file and sfs.is_archive):
+                r = True
+                if sfs.is_dir and not [x for x in sfs.contents(corefs=False) if x.endswith(CoreFS.image_formats())]:
+                    r = False
+
+        self._evaluated = r
+        return self._evaluated
+
+    def get_gallery(self, load=True, update=True, check_exists=False):
+        self.load_metadata(update=update)
+        self.load_pages()
+        if check_exists:
+            self.check_exists()
         return self.gallery
 
-    def _get_folder_pages(self):
+    def get_sources(self, only_single=False):
         ""
-        pages = []
-        dir_images = [
-            x.path for x in os.scandir(
-                self.path) if not x.is_dir() and x.name.endswith(
-                CoreFS.image_formats())]
-        for n, x in enumerate(sorted(dir_images), 1):
-            pages.append((n, os.path.abspath(x)))
-        return pages
+        if only_single:
+            if not self.gallery.single_source:
+                raise NotImplementedError("Loading metadata for a gallery with multiple sources is not supported")
 
-    def _get_archive_pages(self):
-        ""
-        raise NotImplementedError
+        if self.path:
+            return (self.path.path,)
+        if self._sources is not None:
+            return self._sources
+
+        paths = []
+        if self.gallery.id:
+            if self.pages:
+                if self.gallery.single_source:
+                    p_path = self.pages[1].path
+                    paths.append(CoreFS(p_path).parent)
+                else:
+                    for p in self.pages.values():
+                        p_path = CoreFS(p.path).parent
+                        if p_path not in paths:
+                            paths.append(p_path)
+            else:
+                paths = self.gallery.get_sources()
+
+        return tuple(paths)
+
+    def check_exists(self):
+        if self.exists is not None:
+            return self.exists
+        v = False
+        for p in self.get_sources():
+            if db.Gallery.exists_by_path(p, obj=False):
+                v = True
+        self.exists = v
+        return self.exists
+
+    def add(self, view_id=constants.default_temp_view_id, skip_if_exists=False):
+        """
+        """
+        assert isinstance(view_id, int)
+        if not skip_if_exists or not self.check_exists():
+            self.detach()
+            constants.store.galleryfs_addition.get().setdefault(view_id, set()).add(self)
+
+    def send_to_db(self, session=None):
+        try:
+            constants.store.galleryfs_addition.get().remove()
+        except KeyError:
+            pass
+
+        session = session or constants.db_session()
+
+        return session
+
+    def detach(self):
+        self.gallery = db.freeze_object(self.gallery)
 
 
-class NameParser(Command):
+class NameParser(CoreCommand):
     """
+    Extract several components from a gallery name (usually a filename)
+
+    Args:
+        name: the string to parse
+
     """
 
-    #parse = CommandEntry("rename", None, str, str)
+    _extract_title: tuple = CommandEntry("extract_title",
+                                         CParam(
+                                             "name", str, "gallery name, usually a gallery's filename but with its extension removed"),
+                                         __doc="""
+                                Called to extract the title from ``name``
+                                """,
+                                         __doc_return="""
+                                a tuple of strings of all the extracted titles
+                                """)
 
-    def __init__(self):
+    _extract_artist: tuple = CommandEntry("extract_artist",
+                                          CParam(
+                                              "name", str, "gallery name, usually a gallery's filename but with its extension removed"),
+                                          __doc="""
+                                Called to extract the artist from ``name``
+                                """,
+                                          __doc_return="""
+                                a tuple of strings of all the extracted artists
+                                """)
+
+    _extract_collection: tuple = CommandEntry("extract_collection",
+                                              CParam(
+                                                  "name", str, "gallery name, usually a gallery's filename but with its extension removed"),
+                                              __doc="""
+                                Called to extract the convention/magazine from ``name``
+                                """,
+                                              __doc_return="""
+                                a tuple of (collection_name, category_name) of all the extracted convention/magazines
+                                """)
+
+    _extract_language: tuple = CommandEntry("extract_language",
+                                            CParam(
+                                                "name", str, "gallery name, usually a gallery's filename but with its extension removed"),
+                                            __doc="""
+                                Called to extract the language from ``name``
+                                """,
+                                            __doc_return="""
+                                a tuple of strings of all the extracted languages
+                                """)
+
+    _extract_circle: tuple = CommandEntry("extract_circle",
+                                          CParam(
+                                              "name", str, "gallery name, usually a gallery's filename but with its extension removed"),
+                                          __doc="""
+                                Called to extract the circle from ``name``
+                                """,
+                                          __doc_return="""
+                                a tuple of strings of all the extracted circles
+                                """)
+
+    @_extract_title.default()
+    def _extract_gallery_title(name):
+        particles = list(regex.findall(r'((\[|{) *[^\]]+( +\S+)* *(\]|}))', name))  # everyting in brackets
+        particles.extend(list(regex.findall(r"(\(C\d+\))", name, regex.IGNORECASE | regex.UNICODE)))  # Convention name
+
+        for p in utils.regex_first_group(particles):
+            name = name.replace(p, '')
+
+        return tuple([utils.remove_multiple_spaces(name)])
+
+    @_extract_language.default()
+    def _extract_gallery_language(name):
+        langs = []
+        # everyting in brackets and colons; only singlewords
+        particles = list(regex.findall(r'((?<=(\[|{|\()) *(\S+)* *(?=(\]|}|\))))', name))
+        for p in reversed(utils.regex_first_group(particles)):
+            try:
+                l = langcodes.find(p)
+                langs.append(l.autonym())
+            except LookupError:
+                pass
+
+        return tuple(langs)
+
+    @_extract_artist.default()
+    def _extract_gallery_artist(name):
+        artists = []
+        for p in utils.regex_first_group(regex.findall(r"(\(C\d+\))", name, regex.IGNORECASE | regex.UNICODE)):
+            name = name.replace(p, '')
+        name = name.strip()
+        r = regex.compile(r'((?<=(\[|{|\()) *[^\]]+( +\S+)* *(?=(\]|}|\))))')
+        particles = utils.regex_first_group(r.findall(name))  # everyting in brackets and colons
+        if particles:
+            particles = particles[0]
+
+            m = utils.regex_first_group(r.findall(particles))
+            particles = m[0] if m else particles
+
+            artists = [utils.remove_multiple_spaces(x) for x in particles.split(',')]
+
+        return tuple(artists)
+
+    @_extract_circle.default()
+    def _extract_gallery_circle(name):
+        circles = []
+        for p in utils.regex_first_group(regex.findall(r"(\(C\d+\))", name, regex.IGNORECASE | regex.UNICODE)):
+            name = name.replace(p, '')
+        name = name.strip()
+        r = regex.compile(r'((?<=(\[|{|\()) *[^\]]+( +\S+)* *(?=(\]|}|\))))')
+        particles = utils.regex_first_group(r.findall(name))  # everyting in brackets and colons
+        if particles:
+            particles = particles[0]
+            m = utils.regex_first_group(r.findall(particles))  # circle (artist)
+            if m:
+                for x in m:
+                    ex = ('(' + x + ')')
+                    if ex in particles:
+                        particles = particles.replace(ex, '')
+                    else:
+                        particles = particles.replace(x, '')
+
+                particles = particles.replace('[]', '')
+                particles = particles.replace('()', '')
+                particles = particles.replace('{}', '')
+                particles = utils.remove_multiple_spaces(particles)
+                circles.append(particles)
+
+        return tuple(circles)
+
+    @_extract_collection.default()
+    def _extract_gallery_collection(name):
+        category = ""
+        col_name = ""
+
+        class CType:
+            comiket = 1
+            gfm = 2
+
+        for i, r in ((CType.comiket, r"(\(C\d+\))"),
+                     (CType.gfm, r"(\(\s*(from)?\s*girls form vol\.?\s*\d*\s*\))")):
+            m = regex.search(r, name, regex.IGNORECASE | regex.UNICODE)
+            if m:
+                if i == CType.comiket:
+                    col_name = "Comiket " + "".join(x for x in m[0] if x.isdigit())
+                    category = "Convention"
+                elif i == CType.gfm:
+                    d = "".join(x for x in m[0] if x.isdigit())
+                    if len(d) == 1:
+                        d = '0' + d
+                    col_name = "Girls forM Vol. " + d
+                    category = "Magazine"
+                break
+
+        return ((col_name, category),)
+
+    def __init__(self, name: str):
         super().__init__()
-        self.parsed = {}
+        self.titles = tuple()
+        self.artists = tuple()
+        self.collections = tuple()
+        self.languages = tuple()
+        self.circles = tuple()
+
+        fs = CoreFS(name)
+        if fs.ext:
+            self.name = name[:-len(fs.ext)]  # remove ext
+        else:
+            self.name = name
+        self.name = utils.remove_multiple_spaces(self.name)
+
+    def extract_title(self) -> typing.Tuple[str]:
+        if self.titles:
+            return self.titles
+
+        with self._extract_title.call(self.name) as plg:
+            ts = tuple()
+            for t in plg.all(default=True):
+                if t:
+                    ts += t
+            self.titles = tuple(x for x in ts if x)
+        return self.titles
+
+    def extract_artist(self) -> typing.Tuple[str]:
+        if self.artists:
+            return self.artists
+
+        with self._extract_artist.call(self.name) as plg:
+            ts = tuple()
+            for t in plg.all(default=True):
+                if t:
+                    ts += t
+            self.artists = tuple(x for x in ts if x)
+        return self.artists
+
+    def extract_circle(self) -> typing.Tuple[str]:
+        if self.circles:
+            return self.circles
+
+        with self._extract_circle.call(self.name) as plg:
+            ts = tuple()
+            for t in plg.all(default=True):
+                if t:
+                    ts += t
+            self.circles = tuple(x for x in ts if x)
+        return self.circles
+
+    def extract_collection(self) -> typing.Tuple[str]:
+        if self.collections:
+            return self.collections
+
+        with self._extract_collection.call(self.name) as plg:
+            ts = list()
+            for t in plg.all(default=True):
+                for x in t:
+                    if isinstance(x, tuple) and len(x) == 2 and x[0]:
+                        ts.append(x)
+            self.collections = tuple(x for x in ts if x)
+        return self.collections
+
+    def extract_language(self) -> typing.Tuple[str]:
+        if self.languages:
+            return self.languages
+
+        with self._extract_language.call(self.name) as plg:
+            ts = tuple()
+            for t in plg.all(default=True):
+                if t:
+                    ts += t
+            self.languages = tuple(x for x in ts if x)
+        return self.languages
+
+
+class CacheCleaner(Command):
+    """
+    Clean the provided folder
+
+    Args:
+        cache_path: path to cache directory
+        size: only clean if directory size exceeds this number in MB
+        silent: ignore any errors
+
+    Returns:
+        bool indicating whether the folder was cleaned or not
+    """
+
+    def _calculate_size(self, path):
+        "in bytes"
+        total = 0
+        for entry in os.scandir(path):
+            if entry.is_file():
+                total += entry.stat().st_size
+            elif entry.is_dir():
+                total += self._calculate_size(entry.path)
+        return total
+
+    def _clean_contents(self, path, silent, size):
+
+        # delete old files first
+        files = list(sorted(os.scandir(path), key=lambda x: x.stat().st_ctime))
+        for f in files[:int(len(files) / 2)]:
+            try:
+                if f.is_file():
+                    os.unlink(f.path)
+                elif f.is_dir():
+                    shutil.rmtree(f.path)
+            except Exception:
+                if not silent:
+                    raise
+
+        while float(self._calculate_size(path)) > size:
+            self._clean_contents(self, path, silent, size)
+
+    def main(self, cache_path: typing.Union[CoreFS, str], size: float=0.0, silent: bool=False) -> bool:
+        p = CoreFS(cache_path)
+        size = float(size) * 1048576  # 1048576 bytes = 1 mb
+        if p.exists and float(self._calculate_size(p.path)) > size:
+            self._clean_contents(p.path, silent, size)
+            return True
+        return False

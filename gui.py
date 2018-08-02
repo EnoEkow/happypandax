@@ -86,7 +86,8 @@ from PyQt5.QtWidgets import (QApplication,
                              QMenu,
                              QFileDialog,
                              QPlainTextEdit,
-                             QCheckBox)  # noqa: E402
+                             QCheckBox,
+                             QSpinBox)  # noqa: E402
 from PyQt5.QtGui import QIcon, QPalette, QMouseEvent  # noqa: E402
 from PyQt5.QtCore import Qt, QDir, pyqtSignal, QEvent  # noqa: E402
 from i18n import t  # noqa: E402
@@ -202,10 +203,11 @@ class ConvertHP(QDialog):
         self._rar = ""
         self._process = 0
         self._archive = False
-        self._delete = True
+        self._delete = False
         self._dev = False
-        self._args_label = QLabel()
-        self._args_label.setWordWrap(True)
+        self._limit = -1
+        self._offset = 0
+        self._args_edit = QLineEdit(self)
         self.args = []
         self.create_ui()
         self.setMinimumWidth(500)
@@ -223,6 +225,16 @@ class ConvertHP(QDialog):
         lf.addRow(t("gui.t-rar-path", default="RAR tool path") + ':', rar_edit)
         rar_edit.setText(config.unrar_tool_path.value)
 
+        limit_box = QSpinBox(self)
+        limit_box.valueChanged.connect(self.on_limit)
+        lf.addRow(t("gui.t-limit", default="Limit") + ':', limit_box)
+        limit_box.setRange(-1, 2147483647)
+
+        offset_box = QSpinBox(self)
+        offset_box.valueChanged.connect(self.on_offset)
+        lf.addRow(t("gui.t-offset", default="Offset") + ':', offset_box)
+        offset_box.setRange(0, 2147483647)
+
         archive_box = QCheckBox(self)
         archive_box.stateChanged.connect(self.on_archive)
         lf.addRow(t("gui.t-skip-archive", default="Skip archives") + ':', archive_box)
@@ -237,7 +249,7 @@ class ConvertHP(QDialog):
         dev_box.setChecked(constants.dev_db)
         lf.addRow(t("gui.t-dev-mode", default="Dev Mode") + ':', dev_box)
 
-        lf.addRow(t("gui.t-command", default="Command") + ':', self._args_label)
+        lf.addRow(t("gui.t-command", default="Command") + ':', self._args_edit)
         convert_btn = QPushButton(t("gui.b-convert", default="Convert"))
         convert_btn.clicked.connect(self.convert)
         lf.addRow(convert_btn)
@@ -256,6 +268,14 @@ class ConvertHP(QDialog):
 
     def on_archive(self, v):
         self._archive = v
+        self.update_label()
+
+    def on_limit(self, v):
+        self._limit = v
+        self.update_label()
+
+    def on_offset(self, v):
+        self._offset = v
         self.update_label()
 
     def on_delete(self, v):
@@ -280,8 +300,12 @@ class ConvertHP(QDialog):
             self.args .append("--skip-archive")
         if self._delete:
             self.args .append("--delete-target")
+        self.args .append("--limit")
+        self.args .append(str(self._limit))
+        self.args .append("--offset")
+        self.args .append(str(self._offset))
 
-        self._args_label.setText(" ".join(self.args))
+        self._args_edit.setText(" ".join(self.args))
         self.adjustSize()
 
     def convert(self):
@@ -414,7 +438,7 @@ class Window(QMainWindow):
         self.client_started = False
         self.output_tab_idx = 0
         self.force_kill = False
-        self.start_ico = QIcon(os.path.join(constants.dir_static, "favicon.ico")
+        self.start_ico = QIcon(constants.favicon_path
                                )  # qta.icon("fa.play", color="#41f46b")
         self.stop_ico = qta.icon("fa.stop", color="#f45f42")
         self.server_process = None
@@ -499,7 +523,7 @@ class Window(QMainWindow):
         main_layout.addWidget(buttons)
         self.setCentralWidget(w)
 
-        self.tray.setIcon(QIcon(os.path.join(constants.dir_static, "favicon.ico")))
+        self.tray.setIcon(QIcon(constants.favicon_path))
         self.tray.activated.connect(self.tray_activated)
         tray_menu = QMenu()
         tray_menu.addAction(t("gui.t-show", default="Show"), lambda: all((self.showNormal(), self.activateWindow())))
@@ -546,7 +570,7 @@ class Window(QMainWindow):
             self.server_process = self.start_server()
             self.activate_output.emit()
             if config.gui_open_webclient_on_server_start.value:
-                Timer(3, self.open_client).start()
+                Timer(4, self.open_client).start()
         else:
             self.force_kill = True
             self.server_btn.setText(t("gui.b-start-server", default="Start server"))
@@ -657,7 +681,7 @@ if __name__ == "__main__":
 
     app = QApplication(sys.argv)
     app.setAttribute(Qt.AA_EnableHighDpiScaling)
-    app.setWindowIcon(QIcon(os.path.join(constants.dir_static, "favicon.ico")))
+    app.setWindowIcon(QIcon(constants.favicon_path))
     app.setApplicationDisplayName("HappyPanda X")
     app.setApplicationName("HappyPanda X")
     app.setApplicationVersion(".".join(str(x) for x in constants.version))

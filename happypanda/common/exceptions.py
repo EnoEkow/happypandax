@@ -44,7 +44,7 @@ class HappypandaError(RuntimeError):
     def __init__(self, msg):
         """init func."""
         super().__init__(msg)
-        self.msg = "[{}]{}: {}".format(self.code, self.__class__.__name__, msg)
+        self.msg = "[{}] {}: {}".format(self.code, self.__class__.__name__, msg)
 
 # ## CORE -- CODE: 100+ ##
 
@@ -63,6 +63,14 @@ class CoreError(HappypandaError):
         super().__init__(message)
         self.where = where
         self.msg = message
+
+
+@_error_code(102)
+class TimeoutError(CoreError):
+    """
+    Timed out
+    """
+    pass
 
 
 @_error_code(110)
@@ -316,7 +324,7 @@ class ServerDisconnectError(ConnectionError):
 
 
 @_error_code(600)
-class ArchiveError(HappypandaError):
+class ArchiveError(CoreError):
     """Base archive exception, all archive exceptions will derive from this
     """
     pass

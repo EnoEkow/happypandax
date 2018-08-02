@@ -30,6 +30,7 @@ class ConfigNode:
         self.isolation = isolation
         self.namespace = ns
         self.name = name
+        self.fullname = self.namespace + '.' + self.name
         self.default = value
         self.description = description
         self.type_ = type(value) if type_ is None else type_
@@ -449,6 +450,19 @@ with config.namespace(core_ns):
         os.path.join(constants.dir_bin, "unrar.exe") if constants.is_win else "unrar",
         "Path to unrar tool. On Windows the default path is 'bin/win32/unrar.exe'. On Unix the default path is 'unrar'")
 
+    auto_thumb_clean_size = config.create(
+        core_ns,
+        "auto_thumb_clean_size",
+        400,
+        "Maximum size in megabytes to which the thumbnail folder will automatically get emptied when exceeded")
+
+    auto_temp_clean_size = config.create(
+        core_ns,
+        "auto_temp_clean_size",
+        500,
+        "Maximum size in megabytes to which the temp folder will automatically get emptied when exceeded")
+
+
 plugin_ns = 'plugin'
 
 with config.namespace(plugin_ns):
@@ -496,7 +510,23 @@ with config.namespace(gallery_ns):
         gallery_ns,
         "send_path_to_first_file",
         False,
-        "Send path to first file when opening a gallery in external viewer")
+        "Send path to first file when opening a gallery in external viewer",
+    )
+
+    add_to_inbox = config.create(
+        gallery_ns,
+        "add_to_inbox",
+        True,
+        "Add new galleries to inbox",
+        isolation=ConfigIsolation.client
+    )
+
+    auto_rate_gallery_on_favorite = config.create(
+        gallery_ns,
+        "auto_rate_on_favorite",
+        True,
+        "Automatically set unrated galley rating to highest on favorite")
+
 
 db_ns = 'db'
 
@@ -704,6 +734,17 @@ with config.namespace(search_ns):
         True,
         "Also match on descandants")
 
+scan_ns = "scan"
+
+with config.namespace(scan_ns):
+
+    skip_existing_galleries = config.create(
+        None,
+        "skip_existing_galleries",
+        True,
+        "Skip galleries that have already been added to HPX",
+        isolation=ConfigIsolation.client)
+
 client_ns = "client"
 
 with config.namespace(client_ns):
@@ -776,6 +817,12 @@ advanced_ns = "advanced"
 
 with config.namespace(advanced_ns):
 
+    dev_db = config.create(
+        advanced_ns,
+        "dev_db",
+        False,
+        "Use a dev database", hidden=True)
+
     rollbar_access_token = config.create(
         advanced_ns,
         "rollbar_access_token",
@@ -800,11 +847,11 @@ with config.namespace(advanced_ns):
         "",
         "Path to the 7z executable", hidden=True)
 
-    disabled_loggers = config.create(
+    enabled_loggers = config.create(
         advanced_ns,
-        "disabled_loggers",
+        "enabled_loggers",
         [],
-        "Loggers to disable. Available loggers: {}".format(",".join((
+        "Loggers to enable. Available loggers: {}".format(",".join((
             x[:-1] for x in (
                 constants.log_ns_client,
                 constants.log_ns_command,

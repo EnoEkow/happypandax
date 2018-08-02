@@ -31,115 +31,155 @@ def get_config(data=None, error=None):
 
 
 __pragma__('kwargs')
+__pragma__("tconv")
 
 
-def get_item(data=None, error=None):
+def update_menu(data={}):
+    if not data and this.state.data:
+        data = this.state.data
+    if data.id:
+        inbox = data.metatags.inbox
+        trash = data.metatags.trash
+        menu_items = []
+        menu_left = []
+        min_width = 768
+        if inbox:
+            menu_left.append(e(ui.Responsive, e(ui.Button,
+                                                e(ui.Icon, js_name="grid layout"),
+                                                tr(this, "ui.b-send-library", "Send to Library"),
+                                                onClick=this.send_to_library,
+                                                color="green", basic=True),
+                               as_=ui.Menu.Item,
+                               minWidth=min_width,
+                               ))
+        menu_items.append(e(ui.Menu.Menu, *menu_left))
+        menu_right = []
+        menu_right.append(
+            e(ui.Responsive,
+                e(ui.Button, e(ui.Icon, js_name="trash" if not trash else "reply"),
+                  tr(this, "ui.b-send-trash", "Send to Trash") if not trash else tr(this, "ui.b-restore", "Restore"),
+                  color="red" if not trash else "teal", basic=True, onClick=this.send_to_trash if not trash else this.restore_from_trash),
+                as_=ui.Menu.Item,
+                minWidth=min_width,
+              ))
+
+        if trash:
+            menu_right.append(
+                e(ui.Responsive,
+                    e(ui.Button.Group,
+                        e(ui.Button,
+                          e(ui.Icon, js_name="close"), tr(this, "ui.b-delete", "Delete"), color="red"),
+                        e(ui.Button, icon="remove circle", toggle=True, active=this.state.delete_files,
+                          title=tr(this, "ui.t-delete-files", "Delete files")),
+                        e(ui.Button, icon="recycle", toggle=True, active=this.state.send_to_recycle,
+                          title=tr(this, "ui.t-send-recycle-bin", "Send files to Recycle Bin"),
+                          ),
+                        basic=True,
+                      ),
+                    as_=ui.Menu.Item,
+                    minWidth=min_width,
+                  ))
+
+        menu_right.append(e(ui.Responsive,
+                            e(ui.Button, e(ui.Icon, js_name="edit"), tr(this, "ui.b-edit", "Edit"), basic=True),
+                            as_=ui.Menu.Item,
+                            minWidth=min_width,
+                            ))
+
+        menu_items.append(e(ui.Menu.Menu, *menu_right, position="right"))
+
+        if len(menu_items):
+            this.props.menu(menu_items)
+
+    else:
+        this.props.menu(e(ui.Menu.Menu))
+
+
+__pragma__("notconv")
+
+
+def get_item(ctx=None, data=None, error=None, force=False, only_gallery=False):
+    if not this.mounted:
+        return
     if data is not None and not error:
         this.setState({"data": data,
                        "loading": False,
                        "rating": data.rating,
                        'loading_group': True,
                        })
-        if data.metatags.favorite:
-            this.setState({"fav": 1})
-        if data.grouping_id:
-            client.call_func("get_related_items", this.get_grouping,
-                             item_type=ItemType.Grouping,
-                             related_type=this.state.item_type,
-                             item_id=data.grouping_id)
-            client.call_func("get_related_items", this.get_status,
-                             item_type=ItemType.Grouping,
-                             related_type=ItemType.Status,
-                             item_id=data.grouping_id)
-        if data.language_id:
-            client.call_func("get_item", this.get_lang,
-                             item_type=ItemType.Language,
-                             item_id=data.language_id)
 
-        if data.category_id:
-            client.call_func("get_item", this.get_category,
-                             item_type=ItemType.Category,
-                             item_id=data.category_id)
-
-        if data.id:
-            client.call_func("get_related_count", this.get_filter_count,
-                             related_type=ItemType.GalleryFilter,
-                             item_type=this.state.item_type,
-                             item_id=data.id)
-            client.call_func("get_related_items", this.get_collection_data,
-                             related_type=ItemType.Collection,
-                             item_type=this.state.item_type,
-                             item_id=data.id)
-            client.call_func("get_related_items", this.get_filters,
-                             item_type=ItemType.Gallery,
-                             related_type=ItemType.GalleryFilter,
-                             item_id=data.id)
-
-            client.call_func("get_similar", this.get_similar,
-                             item_type=ItemType.Gallery,
-                             item_id=data.id, limit=30)
-            this.setState({"similar_gallery_loading": True})
-
-        if data.id:
-            inbox = data.metatags.inbox
+        if not ctx.only_gallery:
             trash = data.metatags.trash
-            menu_items = []
-            menu_left = []
-            min_width = 768
-            if inbox:
-                menu_left.append(e(ui.Responsive, e(ui.Button, e(ui.Icon, js_name="grid layout"), tr(this, "ui.b-send-library", "Send to Library"), color="green", basic=True),
-                                   as_=ui.Menu.Item,
-                                   minWidth=min_width,
-                                   ))
-            menu_items.append(e(ui.Menu.Menu, *menu_left))
-            menu_right = []
-            menu_right.append(
-                e(ui.Responsive,
-                  e(ui.Button, e(ui.Icon, js_name="trash" if not trash else "reply"),
-                    tr(this, "ui.b-send-trash", "Send to Trash") if not trash else tr(this, "ui.b-restore", "Restore"),
-                    color="red" if not trash else "teal", basic=True),
-                  as_=ui.Menu.Item,
-                  minWidth=min_width,
-                  ))
 
-            if trash:
-                menu_right.append(
-                    e(ui.Responsive,
-                      e(ui.Button.Group,
-                          e(ui.Button,
-                            e(ui.Icon, js_name="close"), tr(this, "ui.b-delete", "Delete"), color="red"),
-                          e(ui.Button, icon="remove circle outline", toggle=True, active=this.state.delete_files,
-                            title=tr(this, "ui.t-delete-files", "Delete files")),
-                          e(ui.Button, icon="recycle", toggle=True, active=this.state.send_to_recycle,
-                            title=tr(this, "ui.t-send-recycle-bin", "Send files to Recycle Bin")),
-                          basic=True,
-                        ),
-                      as_=ui.Menu.Item,
-                      minWidth=min_width,
-                      ))
+            if data.metatags.favorite:
+                this.setState({"fav": 1})
+            else:
+                this.setState({"fav": 0})
 
-            menu_right.append(e(ui.Responsive,
-                                e(ui.Button, e(ui.Icon, js_name="edit"), tr(this, "ui.b-edit", "Edit"), basic=True),
-                                as_=ui.Menu.Item,
-                                minWidth=min_width,
-                                ))
+            if data.grouping_id:
+                client.call_func("get_related_items", this.get_grouping,
+                                 item_type=ItemType.Grouping,
+                                 related_type=this.state.item_type,
+                                 item_id=data.grouping_id)
+                client.call_func("get_related_items", this.get_status,
+                                 item_type=ItemType.Grouping,
+                                 related_type=ItemType.Status,
+                                 item_id=data.grouping_id)
+            if data.language_id:
+                client.call_func("get_item", this.get_lang,
+                                 item_type=ItemType.Language,
+                                 item_id=data.language_id)
 
-            menu_items.append(e(ui.Menu.Menu, *menu_right, position="right"))
+            if data.category_id:
+                client.call_func("get_item", this.get_category,
+                                 item_type=ItemType.Category,
+                                 item_id=data.category_id)
 
-            if len(menu_items):
-                this.props.menu(menu_items)
+            if not trash and data.id:
+                client.call_func("get_related_count", this.get_filter_count,
+                                 related_type=ItemType.GalleryFilter,
+                                 item_type=this.state.item_type,
+                                 item_id=data.id)
+                client.call_func("get_related_items", this.get_collection_data,
+                                 related_type=ItemType.Collection,
+                                 item_type=this.state.item_type,
+                                 item_id=data.id)
+                client.call_func("get_related_items", this.get_filters,
+                                 item_type=ItemType.Gallery,
+                                 related_type=ItemType.GalleryFilter,
+                                 item_id=data.id)
+
+                client.call_func("get_similar", this.get_similar,
+                                 item_type=ItemType.Gallery,
+                                 item_id=data.id, limit=30)
+                this.setState({"similar_gallery_loading": True})
+
+            this.setState({'same_artist_data': []})
+            if not trash and len(data.artists):
+                for a in list(data.artists)[:5]:
+                    client.call_func("get_related_items", this.get_same_artist_data,
+                                     related_type=ItemType.Gallery, item_id=a.id, item_type=ItemType.Artist,
+                                     limit=10 if len(data.artists) > 1 else 30)
+
+            this.update_menu(data)
 
     elif error:
         state.app.notif("Failed to fetch item ({})".format(this.state.id), level="error")
     else:
+        ctx = {'only_gallery': only_gallery, }
+        item_id = this.state.id
         if utils.defined(this.props.location):
             if this.props.location.state and this.props.location.state.gallery:
-                this.get_item(this.props.location.state.gallery)
-                return
+                if int(this.props.match.params.item_id) == this.props.location.state.gallery.id:
+                    if not force:
+                        this.get_item(ctx, this.props.location.state.gallery)
+                        return
+                    else:
+                        item_id = this.props.match.params.item_id
+
         item = this.state.item_type
-        item_id = this.state.id
         if item and item_id:
-            client.call_func("get_item", this.get_item, item_type=item, item_id=item_id)
+            client.call_func("get_item", this.get_item, ctx=ctx, item_type=item, item_id=item_id)
             this.setState({'loading': True})
 
 
@@ -188,6 +228,26 @@ def get_collection_data(data=None, error=None):
         state.app.notif("Failed to fetch collection data ({})".format(this.state.id), level="error")
 
 
+def get_same_artist_data(data=None, error=None):
+    if not this.mounted:
+        return
+    if data is not None and not error:
+        g_id = this.state.data.id or 0
+        items = [x for x in data if x.id != g_id]
+        a_data = this.state.same_artist_data
+        [items.append(x) for x in a_data if x.id != g_id]
+        g_ids = []
+        g_items = []
+        for x in [x for x in items]:
+            if x.id in g_ids:
+                continue
+            g_ids.append(x.id)
+            g_items.append(x)
+        this.setState({'same_artist_data': g_items})
+    elif error:
+        state.app.notif("Failed to fetch same artist data ({})".format(this.state.id), level="error")
+
+
 __pragma__("tconv")
 
 
@@ -201,8 +261,10 @@ __pragma__("notconv")
 
 
 def get_similar_value(cmd):
+    if not this.mounted:
+        return
     v = cmd.get_value()
-    this.setState({"similar_gallery_data": v, 'similar_gallery_loading': False})
+    this.setState({"similar_gallery_data": v or [], 'similar_gallery_loading': False})
 
 
 def get_similar(data=None, error=None):
@@ -240,16 +302,34 @@ __pragma__("tconv")
 
 
 def gallery_on_update(p_props, p_state):
-    if p_props.location.search != this.props.location.search:
-        this.setState({'id': int(utils.get_query("id", 0))})
+    if p_props.location.pathname != this.props.location.pathname:
+        this.setState({'id': int(this.props.match.params.item_id)})
 
     if any((
         p_state.id != this.state.id,
     )):
         this.get_item()
 
+    if any((
+        p_state.data != this.state.data,
+    )):
+        this.update_menu()
+        if this.props.location.state:
+            this.props.location.state.gallery = this.state.data
+            this.props.history.js_replace(this.props.location)
+
 
 __pragma__("tconv")
+
+
+def page_willmount():
+    this.update_menu()
+    this.get_item() if not this.state.data else None
+    this.get_config()
+
+
+def page_willunmount():
+    pass
 
 
 def page_render():
@@ -301,11 +381,11 @@ def page_render():
         external_view.append(e(ui.Button, icon="external", toggle=True, active=this.state.external_viewer,
                                title=tr(this, "ui.t-open-external-viewer", "Open in external viewer"), onClick=this.toggle_external_viewer))
 
-    if this.state.external_viewer:
-        read_btn = {'onClick': this.open_external}
-    else:
-        read_btn = {'as': Link, 'to': utils.build_url(
-            "/item/page", {'gid': item_id}, keep_query=False)}
+    read_btn = {}
+    read_btn['onClick'] = this.on_read
+    if not this.state.external_viewer:
+        read_btn['as'] = Link
+        read_btn['to'] = {'pathname': "/item/gallery/{}/page/1".format(item_id), 'state': {'gallery': this.state.data}}
 
     buttons.append(
         e(ui.Grid.Row,
@@ -313,7 +393,7 @@ def page_render():
             e(ui.Button.Group,
               e(ui.Button, e(ui.Icon, js_name="bookmark outline"), tr(this, "ui.b-save-later", "Save for later")),
               e(ui.Button.Or, text="or"),
-              e(ui.Button, "Read", primary=True, **read_btn),
+              e(ui.Button, tr(this, "ui.b-read", "Read"), primary=True, **read_btn),
               *external_view,
               ),
             textAlign="center",
@@ -377,7 +457,7 @@ def page_render():
             filter_items.append(e(ui.List.Item,
                                   e(ui.List.Icon, js_name="filter"),
                                   e(ui.List.Content, f['name'],),
-                                  as_=Link, to=utils.build_url("/inbox" if inbox else "/library",
+                                  as_=Link, to=utils.build_url("/library",
                                                                {'filter_id': f['id']},
                                                                keep_query=False),
                                   ))
@@ -406,6 +486,18 @@ def page_render():
                                   ],
                                   ))
 
+    series_accordion = []
+    if len(series_data) > 1:
+        series_accordion.append(e(ui.Grid.Row, e(ui.Grid.Column,
+                                                 e(Slider, *[e(galleryitem.Gallery, data=x, className="small-size") for x in series_data],
+                                                   loading=this.state.loading_group,
+                                                   basic=False,
+                                                   secondary=True,
+                                                   sildesToShow=4,
+                                                   color="blue",
+                                                   label=tr(this, "ui.t-series", "Series")),
+                                                 )))
+
     collection_accordion = []
 
     if this.state.collection_count:
@@ -429,9 +521,35 @@ def page_render():
                                       )
                                     )
 
+    same_artist_accordion = []
+
+    same_artist_data = this.state.same_artist_data
+    if len(same_artist_data) > 1:
+        same_artist_accordion.append(e(ui.Grid.Row,
+                                       e(ui.Grid.Column,
+                                         e(LabelAccordion,
+                                           e(Slider,
+                                             *[e(galleryitem.Gallery, data=x, className="small-size")
+                                               for x in same_artist_data],
+                                             secondary=True,
+                                             sildesToShow=4),
+                                           label=tr(
+                                               this,
+                                               "ui.h-more-same-artist",
+                                               "More from same artist",
+                                               count=len(
+                                                   this.state.data.artists)),
+                                             color="violet",
+                                             cfg_suffix=this.cfg_suffix + 'same_artist',
+                                             default_open=True
+                                           )
+                                         )
+                                       )
+                                     )
+
     similar_galleries = []
 
-    if len(this.state.similar_gallery_data) or this.state.similar_gallery_loading:
+    if not trash and (len(this.state.similar_gallery_data) or this.state.similar_gallery_loading):
         similar_gallery_data = this.state.similar_gallery_data
         similar_slider_el = e(Slider,
                               *[e(galleryitem.Gallery, data=x, className="small-size") for x in similar_gallery_data],
@@ -450,7 +568,6 @@ def page_render():
                                      e(LabelAccordion,
                                        similar_progress_el if this.state.similar_gallery_loading else similar_slider_el,
                                        label=tr(this, "ui.h-more-like-this", "More like this"),
-                                       color="teal",
                                        cfg_suffix=this.cfg_suffix + 'similar',
                                        default_open=True
                                        )
@@ -487,8 +604,8 @@ def page_render():
                e(ui.Grid.Column,
                  e(ui.Grid,
                    e(ui.Grid.Row,
-                     e(ui.Grid.Column, e(ui.Rating, icon="heart", size="massive",
-                                         rating=fav), floated="right", className="no-margins"),
+                     e(ui.Grid.Column, e(ui.Rating, icon="heart", size="massive", rating=fav, onRate=this.favorite),
+                       floated="right", className="no-margins"),
                      e(ui.Grid.Column, *indicators, floated="right", textAlign="right", className="no-margins"),
                      columns=2,
                      verticalAlign="middle",
@@ -530,16 +647,9 @@ def page_render():
                  textAlign="center"),
                columns=3
                ),
-             e(ui.Grid.Row, e(ui.Grid.Column,
-                              e(Slider, *[e(galleryitem.Gallery, data=x, className="small-size") for x in series_data],
-                                loading=this.state.loading_group,
-                                basic=False,
-                                secondary=True,
-                                sildesToShow=4,
-                                color="blue",
-                                label=tr(this, "ui.t-series", "Series")),
-                              )),
+             *series_accordion,
              *collection_accordion,
+             *same_artist_accordion,
              *similar_galleries,
              e(ui.Grid.Row, e(ui.Grid.Column, e(itemview.ItemView,
                                                 history=this.props.history,
@@ -566,7 +676,7 @@ Page = createReactClass({
 
     'cfg_suffix': "gallerypage",
 
-    'getInitialState': lambda: {'id': int(utils.get_query("id", 0)),
+    'getInitialState': lambda: {'id': int(this.props.match.params.item_id),
                                 'data': this.props.data,
                                 'rating': 0,
                                 'fav': 0,
@@ -588,9 +698,10 @@ Page = createReactClass({
                                 'similar_gallery_progress': {},
                                 'similar_gallery_loading': True,
                                 'similar_gallery_data': [],
+                                'same_artist_data': [],
                                 },
 
-    'on_read': lambda: utils.go_to(this.props.history, "/item/page", {'gid': this.state.data.id}, keep_query=False),
+    'update_menu': update_menu,
     'get_item': get_item,
     'get_grouping': get_grouping,
     'get_lang': get_lang,
@@ -602,15 +713,34 @@ Page = createReactClass({
     'get_similar_value': get_similar_value,
     'get_similar_progress': get_similar_progress,
     'get_collection_data': get_collection_data,
+    'get_same_artist_data': get_same_artist_data,
     'get_config': get_config,
+    'update_metatags': galleryitem.update_metatags,
     'open_external': galleryitem.open_external,
+    'read_event': galleryitem.read_event,
+
+    'favorite': lambda e, d: all((this.update_metatags({'favorite': bool(d.rating)}),
+                                  this.setState({'fav': d.rating}),
+                                  this.get_item(only_gallery=True, force=True),
+                                  e.preventDefault())),
+    'send_to_library': lambda e, d: all((this.update_metatags({'inbox': False}),
+                                         e.preventDefault())),
+    'send_to_trash': lambda e, d: all((this.update_metatags({'trash': True}),
+                                       e.preventDefault())),
+    'restore_from_trash': lambda e, d: all((this.update_metatags({'trash': False}),
+                                            e.preventDefault())),
+    'read_later': lambda e, d: all((this.update_metatags({'readlater': True}),
+                                    e.preventDefault())),
+
+    'on_read': lambda e, d: all((this.read_event(e, d),
+                                 this.open_external(e, d) if this.state.external_viewer else None,
+                                 this.get_item(force=True))),
 
     'toggle_pages_config': lambda a: this.setState({'visible_page_cfg': not this.state.visible_page_cfg}),
     'toggle_external_viewer': toggle_external_viewer,
 
-    'componentWillMount': lambda: all(((this.get_item() if not this.state.data else None),
-                                       this.get_config(),
-                                       )),
+    'componentWillMount': page_willmount,
+    'componentWillUnmount': page_willunmount,
     'componentDidUpdate': gallery_on_update,
 
     'render': page_render

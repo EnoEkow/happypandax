@@ -32,16 +32,24 @@ def sidebar_nav_render():
     items.append(MenuItem("", position="left", handler=this.props["toggler"],
                           content=e(ui.Icon, className="hpx-alternative huge left")))
 
+    items.append(
+        MenuItem(
+            "Manage",
+            "ui.mi-manage",
+            icon="plus square outline",
+            url="/manage",
+            position="left",
+            handler=this.props["toggler"]))
+
     #items.append(MenuItem("Dashboard", "ui.mi-dashboard", icon="home", url="/dashboard", handler=this.props["toggler"]))
     items.append(MenuItem("Favorites", "ui.mi-favorites", icon="heart", url="/favorite", handler=this.props["toggler"]))
     items.append(
         MenuItem(
             "Library",
-            "ui.mi-library",
+            "ui.mi-browse",
             icon="grid layout",
             url="/library",
             handler=this.props["toggler"]))
-    items.append(MenuItem("Inbox", "ui.mi-inbox", icon="inbox", url="/inbox", handler=this.props["toggler"]))
     items.append(
         MenuItem(
             "directory",
@@ -122,6 +130,8 @@ def sidebar_nav_render():
                         closeIcon=True,
                         onClose=x.on_modal_close,
                         onOpen=x.on_modal_open,
+                        centered=False,
+                        className="min-400-h"
                         )
 
         container.append(menu_el)

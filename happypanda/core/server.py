@@ -35,7 +35,7 @@ def list_api():
         all_functions.extend(getmembers(m, isfunction))
     funcs = {x[0]: x[1] for x in all_functions if not x[0]
              in _special_functions and not x[0].startswith('_')}
-    log.d("Loaded Interface functions:\n\t", list(funcs))
+    log.d(f"Loaded {len(funcs)} Interface functions")
     return funcs
 
 
@@ -470,7 +470,7 @@ class ClientHandler:
             except Exception as e:
                 if not constants.dev:
                     log.exception("An unhandled critical error has occurred")
-                    if isinstance(e, PermissionError, FileNotFoundError):
+                    if isinstance(e, (PermissionError, FileNotFoundError, NotImplementedError)):
                         self.on_error(exceptions.HappypandaError(str(e)))
                     else:
                         self.on_error(exceptions.HappypandaError(
@@ -621,7 +621,7 @@ class HPServer:
 
     def broadcast(self, msg):
         ""
-        for c in self._clients:
+        for c in self._clients.copy():
             c.send(message.finalize(msg, session_id=c.session.id if c.session else ""))
 
     def restart(self):
@@ -658,11 +658,11 @@ class WebServer:
     happyweb.config['PROPAGATE_EXCEPTIONS'] = True  # enable only on debug?
     socketio = SocketIO(happyweb, async_mode="gevent")
 
-    def run(self, host, port, debug=False, logging_queue=None, cmd_args=None):
+    def run(self, host, port, dev=False, debug=False, logging_queue=None, cmd_args=None):
         if logging_queue:
-            hlogger.Logger.setup_logger(cmd_args, logging_queue, debug=debug)
+            hlogger.Logger.setup_logger(cmd_args, logging_queue, dev=dev, debug=debug)
             utils.setup_online_reporter()
-            utils.disable_loggers(config.disabled_loggers.value)
+            utils.enable_loggers(config.enabled_loggers.value)
 
         if cmd_args is not None:
             utils.parse_options(cmd_args)
@@ -673,6 +673,6 @@ class WebServer:
             self._ssl_args['ssl_context'] = utils.create_ssl_context(webserver=True, server_side=True)
             self._ssl_args['suppress_ragged_eofs'] = True
         try:
-            self.socketio.run(self.happyweb, host, port, debug=debug, **self._ssl_args)
+            self.socketio.run(self.happyweb, host, port, debug=False, **self._ssl_args)
         except KeyboardInterrupt:
             pass

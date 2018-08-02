@@ -1,17 +1,17 @@
 import logging
-import pprint
 import sys
 import argparse
 import traceback
 import os
 import multiprocessing as mp
+import pprintpp
 
 try:
     import rollbar  # updater doesn't need this
 except ImportError:
     pass
 
-from multiprocessing import Process, Queue, TimeoutError, queues
+from multiprocessing import Process, TimeoutError, queues
 from logging.handlers import RotatingFileHandler
 
 
@@ -24,7 +24,7 @@ def shutdown(*args):
 
 def eprint(*args, **kwargs):
     "Prints to stderr"
-    print(*args, file=sys.stderr, **kwargs)
+    pprintpp.pprint(*args, stream=sys.stderr, **kwargs)
 
 
 class QueueHandler(logging.Handler):
@@ -35,6 +35,7 @@ class QueueHandler(logging.Handler):
     def __init__(self, queue):
         super().__init__()
         self.queue = queue
+        self.lock = None
 
     def createLock(self):
         return
@@ -55,10 +56,21 @@ class QueueHandler(logging.Handler):
                 self.format(record)
                 record.exc_info = None
             self.queue.put_nowait(record)
+        except TypeError:
+            try:
+                record.args = tuple(str(x) for x in record.args)
+                self.queue.put_nowait(record)
+            except BaseException:
+                self.handleError(record)
         except (KeyboardInterrupt, SystemExit):
             raise
+        except (BrokenPipeError, EOFError):
+            pass
         except BaseException:
             self.handleError(record)
+
+
+getNativeLogger = logging.getLogger
 
 
 class Logger:
@@ -66,6 +78,7 @@ class Logger:
     has_setup = False
     report_online = False
     _queue = None
+    _manager = None
     _logs_queue = []
 
     def __init__(self, name, process=None):
@@ -74,7 +87,7 @@ class Logger:
         self.category = ""
         if '.' in name:
             self.category = name.split('.')[0]
-        self._logger = logging.getLogger(name)
+        self._logger = getNativeLogger(name)
 
     def exception(self, *args):
         ""
@@ -109,7 +122,7 @@ class Logger:
         s = ""
         for a in args:
             if not isinstance(a, str):
-                a = pprint.pformat(a)
+                a = pprintpp.pformat(a)
             s += a
             s += " "
         return s
@@ -148,12 +161,18 @@ class Logger:
         return getattr(self._logger, name)
 
     @classmethod
-    def setup_logger(cls, args=None, logging_queue=None, main=False, debug=False):
+    def setup_logger(cls, args=None, logging_queue=None, main=False, debug=False, dev=False):
         assert isinstance(args, argparse.Namespace) or args is None
-        argsdev = getattr(args, 'dev', False)
-        argsdebug = getattr(args, 'debug', False)
+        argsdev = dev
+        argsdebug = debug
         if logging_queue:
             cls._queue = logging_queue
+
+        # remove all previously set handlers
+        first_time = not bool(logging.root.handlers)
+        for handler in logging.root.handlers[:]:
+            logging.root.removeHandler(handler)
+
         log_level = logging.DEBUG if argsdebug else logging.INFO
         log_handlers = []
         if not argsdev:
@@ -163,6 +182,7 @@ class Logger:
             lg = QueueHandler(cls._queue)
             log_handlers.append(lg)
         else:
+            filemode = "w" if main else "a"  # setup_logger is being two times
             if argsdev:
                 log_handlers.append(logging.StreamHandler())
 
@@ -173,7 +193,7 @@ class Logger:
                 except FileExistsError:
                     pass
 
-                lg = logging.FileHandler(constants.log_debug, 'w', 'utf-8')
+                lg = logging.FileHandler(constants.log_debug, filemode, 'utf-8')
                 lg.setLevel(logging.DEBUG)
                 log_handlers.append(lg)
 
@@ -188,7 +208,7 @@ class Logger:
                 except FileExistsError:
                     pass
 
-                lg = logging.FileHandler(constants.log_plugin, 'w', 'utf-8')
+                lg = logging.FileHandler(constants.log_plugin, filemode, 'utf-8')
                 lg.setLevel(logging.DEBUG)
                 lg.addFilter(plugin_filter)
                 log_handlers.append(lg)
@@ -219,12 +239,9 @@ class Logger:
 
         cls.has_setup = True
         if main:
-            if argsdev:
-                Logger("sqlalchemy.pool").setLevel(logging.DEBUG)
-                Logger("sqlalchemy.engine").setLevel(logging.INFO)
-                Logger("sqlalchemy.orm").setLevel(logging.INFO)
-
-            if debug:
+            Logger("sqlalchemy.orm.relationships").setLevel(logging.ERROR)
+            Logger("sqlalchemy.orm.mapper").setLevel(logging.ERROR)
+            if debug and first_time:
                 Logger(__name__).i(
                     os.path.split(
                         constants.log_debug)[1], "created at", os.path.abspath(
@@ -232,40 +249,48 @@ class Logger:
             else:
                 Logger("apscheduler").setLevel(logging.ERROR)
 
-            for log in cls._logs_queue:
+            while cls._logs_queue:
+                log = cls._logs_queue.pop(0)
                 l = Logger(log[0])
                 l._log(log[1], *log[2], stdout=log[3], stderr=log[4])
 
     @staticmethod
-    def _listener(args, queue):
-        Logger.setup_logger(args)
+    def _listener(queue, args, kwargs):
+        Logger.setup_logger(*args, **kwargs)
         while True:
             try:
                 record = queue.get()
                 if record is None:
                     break
                 Logger(record.name).handle(record)
-            except (KeyboardInterrupt, SystemExit):
-                pass
+            except (EOFError, BrokenPipeError, KeyboardInterrupt, SystemExit):
+                break
             except BaseException:
                 traceback.print_exc(file=sys.stderr)
         shutdown()
-        queue.put(None)
+        try:
+            queue.put(None)
+        except (EOFError, BrokenPipeError,):
+            pass
 
     @classmethod
-    def init_listener(cls, args):
-        assert isinstance(args, argparse.Namespace)
+    def init_listener(cls, *args, **kwargs):
         "Start a listener in a child process, returns queue"
-        q = Queue()
-        Process(target=Logger._listener, args=(args, q,), daemon=True, name="HPX Logger").start()
+        cls._manager = mp.Manager()
+        q = cls._manager.Queue()
+        Process(target=Logger._listener, args=(q, args, kwargs), daemon=True, name="HPX Logger").start()
         cls._queue = q
         return cls._queue
 
     @classmethod
     def shutdown_listener(cls):
         if cls._queue:
-            cls._queue.put(None)
             try:
+                cls._queue.put(None)
                 cls._queue.get(timeout=3)
-            except (TimeoutError, queues.Empty):
+            except (EOFError, BrokenPipeError, TimeoutError, queues.Empty):
                 pass
+
+
+def getLogger(name, *args, **kwargs):
+    return Logger(name, *args, **kwargs)

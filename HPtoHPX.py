@@ -13,9 +13,11 @@ import threading
 import queue
 import codecs
 import regex
+import pathlib
 
 from sqlalchemy_utils.functions import create_database, database_exists, drop_database
 from multiprocessing import Process, Queue, Pipe
+from natsort import natsorted
 
 from happypanda.core import db, plugins
 from happypanda.core.commands import io_cmd
@@ -717,6 +719,14 @@ def parse_args(args=sys.argv[1:]):
     parser.add_argument('source', help="Path to old HP database")
     parser.add_argument('destination', help="Desired path to new HPX database")
     parser.add_argument('-r', '--rar', help="Path to unrar tool", default=config.unrar_tool_path.value)
+    parser.add_argument('-l', '--limit', type=int, default=-
+                        1, help="Limit the amount of galleries being added (inclusive)")
+    parser.add_argument(
+        '-o',
+        '--offset',
+        type=int,
+        default=0,
+        help="Offset the amount of galleries being added (exclusive)")
     parser.add_argument('-p', '--process', type=int, default=3, help="Amount of processes allowed to spawn")
     parser.add_argument(
         '-a',
@@ -753,10 +763,9 @@ def _page_gen(items):
                         afs = io_cmd.CoreFS(path)
                         contents = afs.contents(corefs=False)
                     n = 1
-                    for c in sorted(contents):
+                    for c in natsorted(contents):
                         if c.endswith(img_formats):
-                            if constants.is_win:
-                                c = c.replace('/', '\\')
+                            c = str(pathlib.Path(c))
                             pages.append((os.path.split(c)[1], c, n, True))
                             n += 1
                 finally:
@@ -767,7 +776,7 @@ def _page_gen(items):
                 dir_images = [
                     x.path for x in os.scandir(ch_path) if not x.is_dir() and x.name.endswith(
                         img_formats)]
-                for n, x in enumerate(sorted(dir_images), 1):
+                for n, x in enumerate(natsorted(dir_images), 1):
                     x = io_cmd.CoreFS(x)
                     pages.append((x.name, x.path, n, False))
         except NotImplementedError:
@@ -845,11 +854,16 @@ def main(args=sys.argv[1:]):
         print("Source: ", src)
         print("Destination: ", dst)
 
-        is_rfc = any(dst.lower().startswith(x) for x in ('postgres:', 'mysql+pymysql:', 'sqlite:', 'mysql:'))
+        try:
+            is_rfc = os.path.exists(dst)
+        except BaseException:
+            is_rfc = None
+        is_rfc = False if is_rfc else any(dst.lower().startswith(x)
+                                          for x in ('postgres:', 'mysql+pymysql:', 'sqlite:', 'mysql:'))
 
         if dst.startswith('mysql://'):
             dst = dst.replace('mysql://', 'mysql+pymysql://')
-
+        is_new_db = False
         if (is_rfc and database_exists(dst)) or os.path.exists(dst):
             if args.delete_target:
                 print("Deleting existing target database")
@@ -857,12 +871,16 @@ def main(args=sys.argv[1:]):
                     os.unlink(dst)
                 else:
                     drop_database(dst)
+                is_new_db = True
             else:
-                print("Warning: destination database already exists, you might want to delete")
+                print("Warning: destination database already exists, existing galleries will not be added")
         elif not is_rfc:
+            is_new_db = True
             head, _ = os.path.split(dst)
             if head:
                 os.makedirs(head, exist_ok=True)
+        else:
+            is_new_db = True
 
         if args.skip_archive:
             print("Warning: pages for galleries in archives will not be generated")
@@ -879,9 +897,16 @@ def main(args=sys.argv[1:]):
         DBBase._DB_CONN = conn_src
         ListDB.init_lists()
         print("Fetching gallery lists..")
-        src_galleries = GalleryDB.get_all_gallery()
+        src_galleries = list(GalleryDB.get_all_gallery())
         print("Fetching all galleries, chapters, tags and hashes..")
         print("Fetched galleries count:", len(src_galleries))
+        if args.offset > 0:
+            src_galleries = src_galleries[args.offset:]
+            print(f"Offsetting the amount of galleries to add by {args.offset}")
+        if args.limit > 0:
+            src_galleries = src_galleries[:args.limit]
+            print(f"Limiting the amount of galleries to add by {args.limit}")
+        print(f"Total gallery count to add {len(src_galleries)}")
         print("Creating new HappyPanda X database")
         if not is_rfc:
             engine = db.create_engine(os.path.join("sqlite:///", dst))
@@ -897,21 +922,19 @@ def main(args=sys.argv[1:]):
         db.initEvents(sess)
         s = sess()
         db.init_defaults(s)
-
+        s.autoflush = False
         print("Converting to HappyPanda X Gallery.. ")
 
         gallery_mixmap = {}
         dst_galleries = []
         dst_profiles = []
-        en_lang = db.Language()
-        en_lang.name = "English"
+        en_lang = db.Language.as_unique(name="English")
         dst_languages = {"english": en_lang}
         dst_aliasnames = {}
         dst_artists = {}
         dst_circles = {}
         dst_parodies = {}
         dst_categories = {}
-        dst_status = {}
         dst_namespace = {}
         dst_tag = {}
         dst_nstagmapping = {}
@@ -963,6 +986,25 @@ def main(args=sys.argv[1:]):
                     gallery = db.Gallery()
 
                     if ch.in_archive:
+                        real_path = pathlib.Path(path).joinpath(
+                            ch.path[1:] if ch.path.startswith(('/', '\\')) else ch.path)
+                    else:
+                        real_path = pathlib.Path(ch.path)
+
+                    if not args.delete_target or is_new_db:
+                        if db.Gallery.exists_by_path(real_path, obj=False):
+                            try:
+                                print(
+                                    "\nSkipping '{}' because gallery path already exists in target database.".format(
+                                        ch.title))
+                            except UnicodeError:
+                                print(
+                                    "\nSkipping '{}' because gallery path already exists in target database".format(
+                                        ch.title.encode(
+                                            errors='ignore')))
+                            continue
+
+                    if ch.in_archive:
                         h = hash((g.path, ch.path))
                         if h in unique_paths:
                             continue
@@ -993,23 +1035,28 @@ def main(args=sys.argv[1:]):
                     if gallery_ns is not None:
                         gallery.grouping = gallery_ns
                     else:
-                        gallery_ns = db.Grouping()
-                        gallery_ns.name = ch.title if ch.title else g.title
+                        gallery_ns = db.Grouping.as_unique(name=ch.title if ch.title else g.title)
                         gallery_ns = dst_grouping.get(gallery_ns.name, gallery_ns)
                         dst_grouping[gallery_ns.name] = gallery_ns
                         gallery_ns.galleries.append(gallery)
+
                         if g.status and g.status.lower() != "unknown":
-                            gstatus = db.Status()
-                            gstatus.name = g.status
-                            gstatus = dst_status.get(gstatus.name, gstatus)
-                            gallery_ns.status = gstatus
-                            dst_status[gstatus.name] = gstatus
+                            if g.status.lower() == "completed":
+                                gstatus = db.Status.as_unique(session=sess, name=db.Status.names.completed)
+                            elif g.status.lower() == "ongoing":
+                                gstatus = db.Status.as_unique(session=sess, name=db.Status.names.ongoing)
+                            else:
+                                gstatus = db.Status.as_unique(session=sess, name=g.status)
+                        else:
+                            gstatus = db.Status.as_unique(session=sess, name=db.Status.names.unknown)
+
+                        gallery_ns.status = gstatus
+
                     gallery.number = ch.number
 
                     lang = g.language.lower() if g.language else None
                     if lang and not lang in dst_languages:
-                        db_lang = db.Language()
-                        db_lang.name = g.language
+                        db_lang = db.Language.as_unique(name=g.language)
                         dst_languages[lang] = db_lang
                     else:
                         db_lang = dst_languages['english']
@@ -1024,16 +1071,14 @@ def main(args=sys.argv[1:]):
                         title.name = n_title
                         collection = dst_collections.get(col_name.lower())
                         if not collection:
-                            collection = db.Collection()
-                            collection.name = col_name
+                            collection = db.Collection.as_unique(name=col_name)
                             dst_collections[col_name.lower()] = collection
                         collection.galleries.append(gallery)
 
                         if col_category:
                             col_type = dst_categories.get(col_category.lower())
                             if not col_type:
-                                col_type = db.Category()
-                                col_type.name = col_category
+                                col_type = db.Category.as_unique(name=col_category)
                                 dst_categories[col_category.lower()] = col_type
                             collection.category = col_type
 
@@ -1064,19 +1109,23 @@ def main(args=sys.argv[1:]):
                             artist_names.append(g.artist.strip())
 
                         for a_name in artist_names:
-                            artist = None
-                            artist_name = dst_aliasnames.get(a_name)
-                            if not artist_name:
-                                artist_name = db.AliasName()
-                                artist_name.name = a_name
-                                artist_name.language = db_lang
-                                dst_aliasnames[a_name] = artist_name
-                            artist = dst_artists.get(artist_name.name.lower())
+                            artist = dst_artists.get(a_name.lower())
                             if not artist:
-                                artist = db.Artist()
+                                artist = db.Artist.as_unique(name=a_name)
+                            for a in artist.names:
+                                if a.name.lower() == a_name.lower():
+                                    artist_name = a
+                                    break
+                            else:
+                                artist_name = db.ArtistName.as_unique(name=a_name)
                                 artist.names.append(artist_name)
+
+                            if not artist_name.language:
+                                artist_name.language = db_lang
+
                             gallery.artists.append(artist)
-                            dst_artists[artist_name.name.lower()] = artist
+                            dst_artists[a_name.lower()] = artist
+
                             if 'Group' in g.tags:
                                 circle_tags = g.tags['Group']
                                 for ctag in circle_tags:
@@ -1087,8 +1136,7 @@ def main(args=sys.argv[1:]):
                                     if cname:
                                         circle = dst_circles.get(cname.lower())
                                         if not circle:
-                                            circle = db.Circle()
-                                            circle.name = cname
+                                            circle = db.Circle.as_unique(name=cname)
                                             dst_circles[cname.lower()] = circle
                                         if not circle in artist.circles:
                                             artist.circles.append(circle)
@@ -1104,8 +1152,7 @@ def main(args=sys.argv[1:]):
                     if g.type:
                         gtype = dst_categories.get(g.type.lower())
                         if not gtype:
-                            gtype = db.Category()
-                            gtype.name = g.type
+                            gtype = db.Category.as_unique(name=g.type)
                             dst_categories[gtype.name.lower()] = gtype
                         gallery.category = gtype
 
@@ -1128,14 +1175,17 @@ def main(args=sys.argv[1:]):
                                 if not parody:
                                     if args.debug:
                                         print("Adding new parody:", pname)
-                                    parody = db.Parody()
-                                    parody_name = dst_aliasnames.get(pname)
-                                    if not parody_name:
-                                        parody_name = db.AliasName()
-                                        parody_name.name = pname
+                                    parody = db.Parody.as_unique(name=pname)
+                                    for a in parody.names:
+                                        if a.name.lower() == pname.lower():
+                                            parody_name = a
+                                            break
+                                    else:
+                                        parody_name = db.ParodyName.as_unique(name=pname)
+                                        parody.names.append(parody_name)
+                                    if not parody_name.language:
                                         parody_name.language = dst_languages['english']
-                                        dst_aliasnames[pname] = parody_name
-                                    parody.names.append(parody_name)
+
                                     dst_parodies[pname.lower()] = parody
                                 else:
                                     if args.debug:
@@ -1145,7 +1195,11 @@ def main(args=sys.argv[1:]):
                     gallery.pub_date = g.pub_date
                     gallery.timestamp = g.date_added
                     gallery.last_read = g.last_read
+
                     gallery.times_read = g.times_read
+
+                    if gallery.last_read and gallery.times_read:
+                        gallery.metatags.append(db.MetaTag.as_unique(session=sess, name=db.MetaTag.names.read))
 
                     galleries.append(gallery)
                     if not g.id in gallery_mixmap:
@@ -1155,15 +1209,10 @@ def main(args=sys.argv[1:]):
                 # tags
 
                 for ns in g.tags:
-                    n = db.Namespace(name=constants.special_namespace if ns == 'default' else ns)
-                    n = dst_namespace.get(ns, n)
-                    dst_namespace[ns] = n
+                    n = constants.special_namespace if ns == 'default' else ns
                     for tag in g.tags[ns]:
-                        t = db.Tag(name=tag)
-                        t = dst_tag.get(tag, t)
-                        dst_tag[t.name] = t
-                        nstagname = ns + tag
-                        nstag = db.NamespaceTags(n, t)
+                        nstagname = n + tag
+                        nstag = db.NamespaceTags.as_unique(n, tag)
                         nstag = dst_nstagmapping.get(nstagname, nstag)
                         dst_nstagmapping[nstagname] = nstag
                         for ch_g in galleries:
@@ -1264,13 +1313,13 @@ def main(args=sys.argv[1:]):
         print("\nCreating gallery lists")
         dst_lists = []
         for l in GALLERY_LISTS:
-            glist = db.GalleryFilter()
-            glist.name = l.name
-            glist.filter = l.filter
-            glist.enforce = l.enforce
-            glist.regex = l.regex
-            glist.l_case = l.case
-            glist.strict = l.strict
+            glist = db.GalleryFilter.as_unique(name=l.name)
+            if not glist.id:
+                glist.filter = l.filter
+                glist.enforce = l.enforce
+                glist.regex = l.regex
+                glist.l_case = l.case
+                glist.strict = l.strict
             for g in l.galleries():
                 if g.id in gallery_mixmap:
                     glist.galleries.extend(gallery_mixmap[g.id])
@@ -1288,8 +1337,6 @@ def main(args=sys.argv[1:]):
         # items.extend(dst_artists.values())
         #print("Adding gallery types...")
         # items.extend(dst_gtype.values())
-        #print("Adding gallery status...")
-        # items.extend(dst_status.values())
         #print("Adding gallery namespaces...")
         # items.extend(dst_namespace.values())
         #print("Adding gallery tags...")
@@ -1302,30 +1349,26 @@ def main(args=sys.argv[1:]):
         #s.bulk_save_objects(items, return_defaults=True)
 
         if args.debug:
-            print("Created parodies:")
+            print(f"Created parodies:")
             for p in dst_parodies.values():
                 print(p.names)
 
-        print("Adding languages...")
+        print(f"Adding {len(dst_languages)} languages...")
         s.add_all(dst_languages.values())
-        print("Adding artists...")
+        print(f"Adding {len(dst_artists)} artists...")
         s.add_all(dst_artists.values())
-        print("Adding gallery types...")
+        print(f"Adding {len(dst_categories)} gallery types...")
         s.add_all(dst_categories.values())
-        print("Adding gallery status...")
-        s.add_all(dst_status.values())
-        print("Adding gallery namespaces...")
+        print(f"Adding {len(dst_nstagmapping)} gallery tags...")
         s.add_all(dst_namespace.values())
-        print("Adding gallery tags...")
         s.add_all(dst_tag.values())
         s.add_all(dst_nstagmapping.values())
-        print("Adding galleries...")
+        print(f"Adding {len(dst_galleries)} galleries...")
         s.add_all(dst_galleries)
-        print("Adding gallery lists...")
+        print(f"Adding {len(dst_lists)} gallery lists...")
         s.add_all(dst_lists)
         print("Flushing... (this might take a few minutes)")
         s.flush()
-        print("Adding gallery pages... (this might take a while too)")
         taggable_items = []
         page_items = []
         for g, g_pages in dst_pagelist.items():
@@ -1333,6 +1376,7 @@ def main(args=sys.argv[1:]):
                 p.gallery_id = g.id
                 page_items.append(p)
                 taggable_items.append(db.Taggable())
+        print(f"Adding {len(page_items)} gallery pages... (this might take a while too)")
         if taggable_items:
             one_taggable = taggable_items[0]
             s.add(one_taggable)

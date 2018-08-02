@@ -70,7 +70,7 @@ def menu_nav_render():
            secondary=True,
            borderless=True,
            stackable=True,
-           size="small",
+           size="tiny",
            **menu_args
            )
 
@@ -85,4 +85,4 @@ Menu = createReactClass({
     'render': menu_nav_render,
 
     'toggle_fixed': lambda: this.setState({'fixed': not this.state.fixed})
-})
+}, pure=False)

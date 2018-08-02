@@ -5,7 +5,6 @@ from src.react_utils import (h,
 from src.ui import ui
 from src.client import (ItemType, ImageSize, client)
 from src.single import thumbitem
-from src import utils
 from org.transcrypt.stubs.browser import __pragma__
 __pragma__('alias', 'as_', 'as')
 
@@ -41,6 +40,7 @@ def page_render():
     #fav = 0
     title = ""
     item_id = this.state.id
+    gallery_id = 0
     number = 0
     if this.state.data:
         title = str(this.state.data.number)
@@ -49,8 +49,11 @@ def page_render():
         #    fav = 1
         if not item_id:
             item_id = this.state.data.id
+        gallery_id = this.state.data.gallery_id
 
     add_cls = this.props.className or ""
+
+    page_url = '/item/gallery/{}/page/{}'.format(gallery_id, number)
 
     link = True
     if not this.props.link == js_undefined:
@@ -72,8 +75,8 @@ def page_render():
               )
     if link:
         if not this.props.external_viewer:
-            thumb = e(Link, thumb, to={'pathname': '/item/page',
-                                       'search': utils.query_to_string({'id': item_id, 'number': number})})
+            thumb = e(Link, thumb, to={'pathname': page_url,
+                                       })
 
     return e(ui.Card,
              h("div",
@@ -101,4 +104,4 @@ Page = createReactClass({
     'componentWillMount': lambda: this.setState({'id': this.props.data.id if this.props.data else this.state.data.id if this.state.data else None}),
     'componentDidUpdate': page_on_update,
     'render': page_render
-})
+}, pure=True)

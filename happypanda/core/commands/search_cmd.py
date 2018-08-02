@@ -393,11 +393,11 @@ class PartialModelFilter(Command):
         return expr(value)
 
     @staticmethod
-    def _match_integer_column(session, parent_model, column, term, options, **kwargs):
+    def _match_integer_column(column, value, options, **kwargs):
 
         options.update(kwargs)
 
-        return []
+        return None
 
     @match_model.default(capture=True)
     def _match_gallery(parent_model, child_model, term,
@@ -505,7 +505,7 @@ class PartialModelFilter(Command):
                 x[0] for x in q.join(
                     child_model.names).filter(
                     match_string(
-                        db.AliasName.name,
+                        db.ArtistName.name,
                         term.tag,
                         options)).all())
         return ids
@@ -532,7 +532,7 @@ class PartialModelFilter(Command):
                 x[0] for x in q.join(
                     child_model.names).filter(
                     match_string(
-                        db.AliasName.name,
+                        db.ParodyName.name,
                         term.tag,
                         options)).all())
         return ids

@@ -12,16 +12,41 @@ __pragma__('noskip')
 
 React = require("react")
 ReactDOM = require("react-dom")
-createReactClass = require('create-react-class')
+createReactClass_ = require('create-react-class')
+shallowCompare = require('react-addons-shallow-compare')
 Router = require("react-router-dom").BrowserRouter
 Link = require("react-router-dom").Link
 NavLink = require("react-router-dom").NavLink
 Route = require("react-router-dom").Route
+Prompt = require("react-router-dom").Prompt
 Switch = require("react-router-dom").Switch
 withRouter = require("react-router").withRouter
 Redirect = require("react-router-dom").Redirect
 
 __pragma__("kwargs")
+
+
+def createReactClass(obj, pure=True):
+    if pure and not obj.shouldComponentUpdate:
+        obj['shouldComponentUpdate'] = lambda np, ns: shallowCompare(this, np, ns)
+
+    obj['real_cmpmount'] = obj['componentWillMount']
+    obj['real_cmpunmount'] = obj['componentWillUnmount']
+
+    def cmp_mount():
+        this.mounted = True
+        if this.real_cmpmount:
+            this.real_cmpmount()
+
+    def cmp_unmount():
+        this.mounted = False
+        if this.real_cmpunmount:
+            this.real_cmpunmount()
+
+    obj['componentWillMount'] = cmp_mount
+    obj['componentWillUnmount'] = cmp_unmount
+
+    return createReactClass_(obj)
 
 
 def e(elm_type, *args, **props):

@@ -1,6 +1,5 @@
 from src.react_utils import (e,
                              createReactClass)
-from src.client import ViewType
 from src import pages
 from src.i18n import tr
 from src.ui import TitleChange
@@ -15,9 +14,8 @@ __pragma__('noskip')
 
 
 def page_render():
-    return [e(TitleChange, title=tr(this, "ui.mi-library", "Library"), key=1),
+    return [e(TitleChange, title=tr(this, "ui.mi-browse", "Browse"), key=1),
             e(pages.ItemViewPage,
-              view_type=ViewType.Library,
               history=this.props.history,
               location=this.props.location,
               key=2)]
@@ -27,4 +25,4 @@ Page = createReactClass({
     'displayName': 'LibraryPage',
 
     'render': page_render
-})
+}, pure=True)

@@ -2,6 +2,11 @@ import os  # noqa: E402
 import sys  # noqa: E402
 import rollbar  # noqa: E402
 import getpass  # noqa: E402
+import pdb
+#import faulthandler
+#f = open("fault.log", "w")
+# faulthandler.enable(f)
+#faulthandler.dump_traceback_later(120, repeat=True, file=f)
 
 # OS X: fix the working directory when running a mac app
 # OS X: files are in [app]/Contents/MacOS/
@@ -45,19 +50,16 @@ def create_user_interactive():
 
 
 def check_update():
-    with utils.intertnal_db() as db:
-        update_info = db.get(constants.updater_key, {})
+    update_info = constants.internaldb.get(constants.updater_key, {})
 
     state = None
     if update_info:
         if update_info['state'] == constants.UpdateState.Registered.value:
             update_info['state'] = constants.UpdateState.Installing.value
-            with utils.intertnal_db() as db:
-                db[constants.updater_key] = update_info
+            constants.internaldb[constants.updater_key] = update_info
             state = constants.UpdateState.Installing.value
         else:
-            with utils.intertnal_db() as db:
-                db[constants.updater_key] = {}
+            constants.internaldb[constants.updater_key] = {}
             if not update_info['state'] == constants.UpdateState.Installing.value:
                 state = update_info['state']
     return state
@@ -90,8 +92,27 @@ def cmd_commands(args):
 
     if args.list_users:
         for u in db.list_users(limit=20, offset=args.list_users - 1):
-            print("{}\t{}".format(u.name, u.role.value))
+            print("{}\t[{}]".format(u.name, u.role.value))
         return True
+
+
+def init_commands(args):
+    if not args.only_web:
+        upd_int = config.check_release_interval.value or config.check_release_interval.default
+        upd_id = services.Scheduler.generic.add_command(meta_cmd.CheckUpdate(),
+                                                        IntervalTrigger(minutes=upd_int))
+        log.i("Initiating background", meta_cmd.CheckUpdate.__name__)
+        services.Scheduler.generic.start_command(upd_id, push=True)
+
+        log.i("Initiating background thumbnail", io_cmd.CacheCleaner.__name__)
+        thumb_id = services.TaskService.generic.add_command(io_cmd.CacheCleaner())
+        constants.task_command.thumbnail_cleaner = services.TaskService.generic.start_command(
+            thumb_id, constants.dir_thumbs, size=config.auto_thumb_clean_size.value, silent=True)
+
+        log.i("Initiating background temp", io_cmd.CacheCleaner.__name__)
+        temp_id = services.TaskService.generic.add_command(io_cmd.CacheCleaner())
+        constants.task_command.temp_cleaner = services.TaskService.generic.start_command(
+            temp_id, constants.dir_temp, size=config.auto_temp_clean_size.value, silent=True)
 
 
 def start(argv=None, db_kwargs={}):
@@ -99,6 +120,7 @@ def start(argv=None, db_kwargs={}):
     e_code = None
     e_num = 0
     try:
+        utils.setup_online_reporter()
         log.i("HPX START")
         log.i("Version:", constants.version_str)
         log.i("DB Version:", constants.version_db_str)
@@ -108,28 +130,37 @@ def start(argv=None, db_kwargs={}):
         utils.setup_dirs()
         args = parser.parse_args(argv)
         utils.parse_options(args)
+        # setup logger without multiprocessing
+        hlogger.Logger.setup_logger(args, main=True, dev=constants.dev, debug=config.debug.value)
+        utils.enable_loggers(config.enabled_loggers.value)
         db_inited = False
         if constants.dev:
             log.i("DEVELOPER MODE ENABLED", stdout=True)
+        else:
+            pdb.set_trace = lambda: None  # disable pdb
         if config.debug.value:
             log.i("DEBUG MODE ENABLED", stdout=True)
         log.i(utils.os_info())
 
         if not args.only_web:
             db_inited = db.init(**db_kwargs)
-            command.init_commands()
+            command.setup_commands()
         else:
             db_inited = True
 
         if cmd_commands(args):
             return
 
-        if not args.only_web:
-            hlogger.Logger.init_listener(args)
+        if not args.only_web:  # can't init earlier because of cmd_commands
+            hlogger.Logger.init_listener(args=args, debug=config.debug.value, dev=constants.dev)
 
-        utils.setup_online_reporter()
-        hlogger.Logger.setup_logger(args, main=True, debug=config.debug.value, logging_queue=hlogger.Logger._queue)
-        utils.disable_loggers(config.disabled_loggers.value)
+        # setup logger with multiprocessing
+        hlogger.Logger.setup_logger(
+            args,
+            main=True,
+            dev=constants.dev,
+            debug=config.debug.value,
+            logging_queue=hlogger.Logger._queue)
 
         update_state = check_update() if not (not constants.is_frozen and constants.dev) else None
 
@@ -140,7 +171,7 @@ def start(argv=None, db_kwargs={}):
             if not args.only_web:
                 constants.available_commands = command.get_available_commands()
 
-                services.init_generic_services()
+                services.setup_generic_services()
 
                 constants.plugin_manager = plugins.PluginManager()
 
@@ -151,22 +182,24 @@ def start(argv=None, db_kwargs={}):
 
             constants.notification = server.ClientNotifications()
 
-            if not args.only_web:
-                upd_int = config.check_release_interval.value or config.check_release_interval.default
-                upd_id = services.Scheduler.generic.add_command(meta_cmd.CheckUpdate(),
-                                                                IntervalTrigger(minutes=upd_int))
-                services.Scheduler.generic.start_command(upd_id, push=True)
             # starting stuff
             services.Scheduler.generic.start()
+            init_commands(args)
+
             log.i("Starting webserver... ({}:{})".format(config.host_web.value, config.port_web.value), stdout=True)
-            web_args = (config.host_web.value, config.port_web.value, constants.dev if args.only_web else False)
+            web_args = (config.host_web.value, config.port_web.value)
+            web_kwargs = {
+                'dev': constants.dev,
+                'debug': config.debug.value,
+            }
             if args.only_web:
-                server.WebServer().run(*web_args)
+                server.WebServer().run(*web_args, **web_kwargs)
             else:
+                web_kwargs.update({'logging_queue': hlogger.Logger._queue,
+                                   'cmd_args': args, })
                 constants.web_proc = Process(target=server.WebServer().run,
                                              args=web_args,
-                                             kwargs={'logging_queue': hlogger.Logger._queue,
-                                                     'cmd_args': args},
+                                             kwargs=web_kwargs,
                                              daemon=True,
                                              name="gevent")
                 constants.web_proc.start()
@@ -176,14 +209,13 @@ def start(argv=None, db_kwargs={}):
                 meta_cmd.UpdateApplication.update.subscribe(hp_server.update)
                 e_code = hp_server.run(interactive=args.interact)
 
-            io_cmd.CoreFS(constants.dir_temp).delete(ignore_errors=True)
-
         else:
             if db_inited:
                 e_code = constants.ExitCode.Update
             else:
                 e_code = constants.ExitCode.Exit
 
+        io_cmd.CoreFS(constants.dir_temp).delete(ignore_errors=True)
         log.i("HPX END")
 
         if e_code == constants.ExitCode.Exit:
@@ -192,6 +224,7 @@ def start(argv=None, db_kwargs={}):
             log.i("Restarting...", stdout=True)
         if not args.only_web:
             config.config.save()
+            services.Scheduler.shutdown_all()
             hlogger.Logger.shutdown_listener()
 
         hlogger.shutdown()

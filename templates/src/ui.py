@@ -52,6 +52,7 @@ def Slider(props):
                         dots=True,
                         dotsClass="slick-dots",
                         draggable=True,
+                        variableWidth=True,
                         infinite=False if not utils.defined(props.infinite) else props.infinite,
                         centerMode=False,
                         accessibility=True,
@@ -134,10 +135,9 @@ def pagination_render():
     pages = this.props.pages
     if not pages or pages < 1:
         pages = 1
-    if this.props.history and this.props.query:
+    current_page = this.props.current_page or this.state.current_page
+    if this.props.history and this.props.query and not current_page:
         current_page = utils.get_query("page", this.state.current_page)
-    else:
-        current_page = this.props.current_page or this.state.current_page
     if not current_page:
         current_page = 1
     current_page = int(current_page)
@@ -199,10 +199,11 @@ def pagination_render():
                       size="mini",
                       js_type="number",
                       placeholder=current_page,
-                      action=e(ui.Button, compact=True, icon="share", onClick=this.go_to_page,
+                      action=e(ui.Button, js_type="submit", compact=True, icon="share", onClick=this.go_to_page,
                                **query_args),
                       min=0, max=pages),
                     ),
+                  onSubmit=this.go_to_page
                 ),
               on="click",
               hoverable=True,
@@ -236,7 +237,7 @@ def pagination_render():
              *items,
              pagination=True,
              borderless=True,
-             size=this.props.size,
+             size=this.props.size if utils.defined(this.props.size) else "small",
              as_=ui.Transition.Group,
              duration=1000,
              )
@@ -258,7 +259,7 @@ Pagination = createReactClass({
     'go_prev': lambda e, d: this.change_page((int(this.props.current_page or this.state.current_page) - 1)),
     'go_next': lambda e, d: this.change_page(int(this.props.current_page or this.state.current_page) + 1),
 
-    'componentDidMount': lambda: this.change_page(utils.get_query("page", 1), True) if this.props.history and this.props.query else None,
+    'componentDidMount': lambda: this.change_page(this.props.current_page or this.props.default_page or utils.get_query("page", 1), True) if this.props.history and this.props.query else None,
     'componentWillReceiveProps': pagination_receive_props,
 
     'render': pagination_render
@@ -279,7 +280,7 @@ ToggleIcon = createReactClass({
                         onClick=this.toggle,
                         link=True,
                         )
-})
+}, pure=True)
 
 
 def connectstatus_render():
@@ -301,7 +302,7 @@ ConnectStatus = createReactClass({
                            this.props.on_toggle(not this.state.toggled) if this.props.on_toggle else None)),
 
     'render': connectstatus_render,
-})
+}, pure=True)
 
 LabelAccordion = createReactClass({
     'displayName': 'LabelAccordion',
@@ -329,7 +330,7 @@ LabelAccordion = createReactClass({
                         basic=this.props.basic if utils.defined(this.props.basic) else True,
                         className="small-padding-segment",
                         ),
-})
+}, pure=True)
 
 
 def datelbl_render():
@@ -363,7 +364,7 @@ DateLabel = createReactClass({
     'toggle': lambda: this.setState({'toggled': not this.state.toggled}),
 
     'render': datelbl_render,
-})
+}, pure=True)
 
 
 def TitleChange(props):
@@ -380,4 +381,4 @@ TR = createReactClass({
 
 
     'render': tr_render,
-})
+}, pure=True)

@@ -1,6 +1,13 @@
+import pdb
+import sys
+import os
+import tinydb
+import __main__
+
+from tinydb.storages import MemoryStorage
 from collections import UserList
 
-from happypanda.common import constants, hlogger, utils
+from happypanda.common import constants, hlogger
 
 log = hlogger.Logger(constants.log_ns_misc + __name__)
 
@@ -23,8 +30,31 @@ class AttributeList(UserList):
         raise AttributeError("AttributeError: no attribute named '{}'".format(key))
 
 
+class AttributeDict(dict):
+    """
+    l = AttributeDict()
+    l.one = "yes"
+    l['one'] == 'yes'
+    l.one == "yes"
+    'one' in l
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def __setattr__(self, name, value):
+        self[name] = value
+
+    def __getattr__(self, key):
+        if key in self:
+            return self[key]
+        raise AttributeError("AttributeError: no attribute named '{}'".format(key))
+
+
 class Invalidator:
     """
+    An invalidation implementation.
+    Acts like a switch that turns to false on subsequent access
     """
 
     def __init__(self, parent=None, value=False):
@@ -58,33 +88,127 @@ class CacheInvalidation:
 constants.invalidator = CacheInvalidation()
 
 
-class InternalDatabase:
+class _Nothing:
+    pass
+
+
+class InternalTinyDB:
+
+    query = tinydb.Query()
 
     class GetSet:
 
-        def __init__(self, key):
+        def __init__(self, idb, key, default=None):
+            self._idb = idb
             self.key = key
+            if default is not None:
+                self.set(default)
 
-        def get(self, default=None):
-            with utils.intertnal_db() as db:
-                return db.get(self.key, default)
+        def get(self, default=_Nothing):
+            return self._idb.get(self.key, default)
 
         def set(self, value):
-            with utils.intertnal_db() as db:
-                db[self.key] = value
+            return self._idb.set(self.key, value)
 
-        def __call__(self, default=None):
+        def __call__(self, default=_Nothing):
             return self.get(default)
 
-    release_tags = GetSet("release_tags")
-    latest_release = GetSet("latest_release")
-    update_info = GetSet(constants.updater_key)
-    network_session = GetSet("network_session")
+    def __init__(self, db):
+        self._db = db
 
-    similar_gallery_calc = GetSet("similar_gallery_calc")
-    similar_gallery_tags = GetSet("similar_gallery_tags")
+    def get(self, key, default=_Nothing):
+        r = self._db.get(self.query.key == key)
+        if r is None:
+            if default == _Nothing:
+                raise KeyError(f"Key {key} does not exist")
+            return default
+        v = r['value']
+        if r['type'] == str(type(tuple)):
+            v = tuple(v)
+        return v
 
-    plugins_state = GetSet("plugins_state")
+    def set(self, key, value):
+        self._db.upsert({'key': key, 'value': value, 'type': str(type(value))}, self.query.key == key)
+
+    def __contains__(self, k):
+        return self._db.contains(self.query.key == k)
+
+    def __getitem__(self, key):
+        return self.get(key)
+
+    def __setitem__(self, key, value):
+        self.set(key, value)
+
+    def __delitem__(self, key):
+        raise NotImplementedError
+
+    def __iter__(self):
+        raise NotImplementedError
+
+    def __len__(self):
+        return len(self._db)
 
 
-constants.internaldb = internaldb = InternalDatabase()
+class InternalDatabase(InternalTinyDB):
+
+    def __init__(self, db_path):
+        os.makedirs(os.path.split(db_path)[0], exist_ok=True)
+        super().__init__(tinydb.TinyDB(db_path))
+
+        self.release_tags = self.GetSet(self, "release_tags")
+        self.latest_release = self.GetSet(self, "latest_release")
+        self.update_info = self.GetSet(self, constants.updater_key)
+        self.network_session = self.GetSet(self, "network_session")
+
+        self.similar_gallery_calc = self.GetSet(self, "similar_gallery_calc")
+        self.similar_gallery_tags = self.GetSet(self, "similar_gallery_tags")
+
+        self.plugins_state = self.GetSet(self, "plugins_state")
+
+        self.scheduler_commands = self.GetSet(self, "scheduler_commands")
+
+
+class InternalStore(InternalTinyDB):
+
+    def __init__(self):
+        super().__init__(tinydb.TinyDB(storage=MemoryStorage))
+        self.temp_view = InternalTinyDB(self._db.table("temp_view"))
+        self.galleryfs_addition = self.GetSet(self.temp_view, "galleryfs_addition", {})
+
+
+constants.store = store = InternalStore()
+
+in_test = hasattr(sys, "_called_from_test")
+if in_test:
+    constants.internaldb = internaldb = None
+else:
+    constants.internaldb = internaldb = InternalDatabase(constants.internal_db_path)
+
+in_repl = not hasattr(__main__, '__file__') or in_test
+if getattr(sys, 'frozen', False):
+    in_repl = True
+
+
+class ForkablePdb(pdb.Pdb):
+
+    if not in_repl:
+        _original_stdin_fd = sys.stdin.fileno()
+        _original_stdin = None
+
+    def __init__(self):
+        pdb.Pdb.__init__(self, nosigint=True)
+
+    def _cmdloop(self):
+        current_stdin = sys.stdin
+        try:
+            if not self._original_stdin:
+                self._original_stdin = os.fdopen(self._original_stdin_fd)
+            sys.stdin = self._original_stdin
+            self.cmdloop()
+        finally:
+            sys.stdin = current_stdin
+
+
+if not in_repl and __name__ == '__mp_main__' or (__name__ == '__main__' and len(
+        sys.argv) >= 2 and sys.argv[1] == '--multiprocessing-fork'):
+    pdb.set_trace = ForkablePdb().set_trace

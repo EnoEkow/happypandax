@@ -5,11 +5,12 @@ UI
 """
 
 import i18n
+import itertools
 
 from collections import OrderedDict
 
-from happypanda.common import utils, exceptions, hlogger, config
-from happypanda.core import message, db
+from happypanda.common import utils, exceptions, hlogger, config, constants
+from happypanda.core import message, db, services
 from happypanda.interface import enums, helpers
 from happypanda.core.commands import database_cmd, search_cmd
 
@@ -82,7 +83,7 @@ def _view_helper(item_type: enums.ItemType=enums.ItemType.Gallery,
         metatag_name = db.MetaTag.names.favorite
     elif view_filter == enums.ViewType.Inbox:
         metatag_name = db.MetaTag.names.inbox
-    elif view_filter == enums.ViewType.Inbox:
+    elif view_filter == enums.ViewType.Trash:
         metatag_name = db.MetaTag.names.trash
 
     if metatag_name:
@@ -93,6 +94,9 @@ def _view_helper(item_type: enums.ItemType=enums.ItemType.Gallery,
         if hasattr(db_model, "metatags"):
             filter_op.append(~db_model.metatags.any(db.MetaTag.name == db.MetaTag.names.inbox))
             filter_op.append(~db_model.metatags.any(db.MetaTag.name == db.MetaTag.names.trash))
+    elif view_filter == enums.ViewType.All:
+        if hasattr(db_model, "metatags"):
+            filter_op.append(~db_model.metatags.any(db.MetaTag.name == db.MetaTag.names.trash))
 
     if related_type:
         filter_op.append(parent_model.id == item_id)
@@ -102,6 +106,8 @@ def _view_helper(item_type: enums.ItemType=enums.ItemType.Gallery,
         filter_op = db.and_op(*filter_op)
     elif filter_op:
         filter_op = filter_op[0]
+    else:
+        filter_op = None
 
     return view_filter, item_type, db_msg, db_model, model_ids, filter_op, join_exp, metatag_name
 
@@ -248,6 +254,40 @@ def translate(t_id: str, locale: str = None, default: str = None, placeholder: s
     return message.Identity("translation", trs)
 
 
+def get_translations(locale: str = None):
+    """
+    Get all translations for given locale
+
+    You can find more about translations :ref:`here <Translations>`.
+
+    Args:
+        locale: locale to get translations from (will override default locale)
+
+    Returns:
+        .. code-block:: guess
+
+            {
+                'namespace.translation_id' : string
+            }
+
+    .. seealso::
+
+        :func:`.get_locales`
+    """
+    trs = {}
+    locale = helpers._get_locale(locale).lower()
+    container = i18n.translations.container
+    if locale in container:
+        trs = container[locale].copy()
+    else:
+        try:
+            translate("general.locale")
+            trs = container[locale].copy()
+        except exceptions.APIError:
+            pass
+    return message.Identity("translations", trs)
+
+
 def get_sort_indexes(item_type: enums.ItemType=None, translate: bool=True, locale: str=None):
     """
     Get a list of available sort item indexes and names
@@ -291,3 +331,79 @@ def get_sort_indexes(item_type: enums.ItemType=None, translate: bool=True, local
                 'item_type': i.value
             })
     return sort_indexes
+
+
+def temporary_view(view_type: enums.TemporaryViewType = enums.TemporaryViewType.GalleryAddition,
+                   view_id: int = None,
+                   limit: int = 100,
+                   offset: int = 0,
+                   # sort_by: enums.ItemSort = None,
+                   # sort_desc: bool=False,
+                   ):
+    """
+    not ready yet...
+
+    Args:
+        view_type: type of temporary view
+        view_id: id of a specific view
+        limit: amount of items per page
+        offset: offset the results by n items
+
+    Returns:
+        .. code-block:: guess
+
+            {
+                'items': [
+                        ...
+                    ],
+                'count': int # count of all items in view
+            }
+    """
+    view_type = enums.TemporaryViewType.get(view_type)
+    d = {'items': [], 'count': 0}
+    msg_obj = None
+
+    sess = constants.db_session()
+    sess.autoflush = False
+
+    if view_type == enums.TemporaryViewType.GalleryAddition:
+        msg_obj = message.GalleryFS
+        c = constants.store.galleryfs_addition.get({})
+        if view_id:
+            c = list(c.get(view_id, tuple()))
+        else:
+            c = list(itertools.chain(*c.values()))
+
+    d['count'] = len(c)
+    d['items'] = [msg_obj(x).json_friendly(False) if msg_obj else x for x in c[offset:offset + limit]]
+
+    return message.Identity('items', d)
+
+
+def submit_temporary_view(view_type: enums.TemporaryViewType = enums.TemporaryViewType.GalleryAddition,
+                          view_id: int = None,):
+    """
+    not ready yet...
+
+    Args:
+        view_type: type of temporary view
+        view_id: id of a specific view
+    Returns:
+        []
+
+    |async command|
+
+    """
+    view_type = enums.TemporaryViewType.get(view_type)
+
+    cmd_id = None
+
+    if view_type == enums.TemporaryViewType.GalleryAddition:
+        c = constants.store.galleryfs_addition.get({})
+        if view_id:
+            c = list(c.get(view_id, tuple()))
+        else:
+            c = list(itertools.chain(*c.values()))
+        cmd_id = database_cmd.AddItem(services.AsyncService.generic).run(c)
+
+    return message.Identity('command_id', cmd_id)

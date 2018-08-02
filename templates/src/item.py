@@ -2,7 +2,7 @@ from src.react_utils import (h,
                              e,
                              createReactClass)
 from src.ui import ui
-from src.client import (client, ItemType)
+from src.client import (client, ItemType, ViewType)
 from src.i18n import tr
 from src.state import state
 from src import utils
@@ -87,7 +87,8 @@ def search_render():
                                  ),
                                trigger=e(ui.Button, icon=e(ui.Icon.Group,
                                                            e(ui.Icon, js_name="options"),
-                                                           e(ui.Icon, js_name="search", corner=True)), js_type="button", basic=True),
+                                                           e(ui.Icon, js_name="search", corner=True)),
+                                         js_type="button", basic=True, size=this.props.size),
                                hoverable=True,
                                on="click",
                                hideOnScroll=True,),
@@ -200,7 +201,11 @@ def itembuttons_change(e, d):
 
 
 def itembuttons_render():
+    ch = this.props.children
+    if not isinstance(ch, list):
+        ch = [ch]
     return e(ui.Button.Group,
+             *ch,
              e(ui.Button, tr(this, "general.db-item-collection", "Collection"),
                value=ItemType.Collection,
                onClick=this.item_change,
@@ -214,7 +219,8 @@ def itembuttons_render():
                basic=this.props.value == ItemType.Gallery,
                ),
              toggle=True,
-             basic=True
+             basic=True,
+             size=this.props.size if utils.defined(this.props.size) else "small"
              )
 
 
@@ -259,8 +265,8 @@ def sortdropdown_render():
     return e(ui.Dropdown,
              placeholder=tr(this, "ui.t-sortdropdown-placeholder", "Sort by"),
              options=item_options,
-             value=this.props.value if this.props.value else js_undefined,
-             defaultValue=this.props.defaultValue if this.props.defaultValue else js_undefined,
+             value=this.props.value,
+             defaultValue=this.props.defaultValue,
              onChange=this.item_change,
              loading=this.state.loading,
              selectOnBlur=False,
@@ -320,8 +326,8 @@ def filterdropdown_render():
              options=item_options,
              search=True,
              allowAdditions=True,
-             value=this.props.value if this.props.value else js_undefined,
-             defaultValue=this.props.defaultValue if this.props.defaultValue else js_undefined,
+             value=this.props.value or js_undefined,
+             defaultValue=this.props.defaultValue,
              onChange=this.item_change,
              loading=this.state.loading,
              selectOnBlur=False,
@@ -346,4 +352,64 @@ FilterDropdown = createReactClass({
     'componentDidMount': lambda: this.get_items(),
 
     'render': filterdropdown_render
+})
+
+
+def viewdropdown_change(e, d):
+    if this.props.query:
+        utils.go_to(this.props.history, query={'view_type': d.value}, push=False)
+    if this.props.on_change:
+        this.props.on_change(e, d)
+
+
+def viewdropdown_render():
+    item_options = [
+        {'text': tr(this, "ui.mi-all", "All"),
+         'value': ViewType.All,
+         },
+        {'text': tr(this, "ui.mi-library", "Library"),
+         'value': ViewType.Library,
+         },
+        {'text': tr(this, "ui.mi-inbox", "Inbox"),
+         'value': ViewType.Inbox,
+         },
+    ]
+
+    if this.props.view_type == ViewType.Favorite:
+        item_options = [
+            {'text': tr(this, "ui.mi-favorites", "Favorites"),
+                'value': this.props.view_type,
+             },
+        ]
+    elif this.props.view_type != None:  # noqa: E711
+        for x in item_options:
+            if x['value'] == this.props.view_type:
+                item_options = [x]
+                break
+
+    return e(ui.Dropdown,
+             options=item_options,
+             value=this.props.value,
+             defaultValue=this.props.defaultValue,
+             onChange=this.item_change,
+             selectOnBlur=False,
+             pointing=this.props.pointing,
+             labeled=this.props.labeled,
+             inline=this.props.inline,
+             compact=this.props.compact,
+             button=this.props.button,
+             item=this.props.item,
+             selection=this.props.selection,
+             basic=this.props.basic,
+             className=this.props.className,
+             disabled=True if this.props.view_type != None else js_undefined,  # noqa: E711
+             icon=None if this.props.view_type else js_undefined
+             )
+
+
+ViewDropdown = createReactClass({
+    'displayName': 'ViewDropdown',
+
+    'item_change': viewdropdown_change,
+    'render': viewdropdown_render
 })
