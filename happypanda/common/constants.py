@@ -35,10 +35,10 @@ updater_name = "happyupd"  # windows will make it require escalted priv. if name
 updater_key = "updater"
 
 ## VERSIONING ##
-build = 134
-version = (0, 2, 0)
-version_db = (0, 1, 1)
-version_web = (0, 2, 0)
+build = 135
+version = (0, 3, 0)
+version_db = (0, 2, 0)
+version_web = (0, 3, 0)
 version_str = ".".join(str(x) for x in version)
 version_db_str = ".".join(str(x) for x in version_db)
 version_web_str = ".".join(str(x) for x in version_web)
@@ -83,6 +83,8 @@ invalidator = None
 internaldb = None
 web_proc = None  # webserver process
 notification = None  # ClientNotifications
+
+cache_regions = {}  # will be clsutils.AttributeDict
 
 general_counter = itertools.count(50)
 default_temp_view_id = 1
@@ -158,6 +160,8 @@ super_user_name = "default"
 
 maximum_native_workers = 15
 
+maximum_cpu_threads = 2  # os.cpu_count() or 1
+
 command_progress_removal_time = 60 * 5  # seconds
 
 is_new_db = False
@@ -166,6 +170,11 @@ image_sizes = {
     "big": (300, 416),
     "medium": (200, 276),
     "small": (100, 136),
+    "x2400": (2400, 0),
+    "x1600": (1600, 0),
+    "x1280": (1280, 0),
+    "x960": (960, 0),
+    "x768": (768, 0),
 }
 
 translations = None  # dict of available translation files
@@ -185,6 +194,7 @@ db_session = None
 _db_scoped_session = None
 default_user = None
 special_namespace = "__namespace__"
+gallery_grouping_init = True
 
 scheduler_database_url = os.path.join("sqlite:///", dir_data, "scheduler.db")
 

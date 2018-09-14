@@ -184,6 +184,9 @@ class Error(CoreMessage):
 class DatabaseMessage(CoreMessage):
     "Database item mapper"
 
+    class NoUnpack(Exception):
+        pass
+
     _msg_path = []
     _clsmembers = None  # not all classes have been defined yet
     _db_clsmembers = [
@@ -259,14 +262,19 @@ class DatabaseMessage(CoreMessage):
 
         with db.no_autoflush(self._sess):
             ex = tuple(x for x, y in self._properties['exclusions'].items() if not y)
+            default_ex = ('user',)
             gattribs = db.table_attribs(self.item, not load_values, descriptors=True, raise_err=not self._detached,
-                                        exclude=ex if not bypass_exclusions else tuple(),
+                                        exclude=ex + default_ex if not bypass_exclusions else default_ex,
                                         allow=tuple(self._properties['force_value_load'].keys()))
-            r = {
-                x: self._unpack(
-                    x,
-                    gattribs[x],
-                    load_values, load_collections, propagate_bypass) for x in gattribs}
+            for i in ('_properties',):
+                gattribs.pop(i, False)
+
+            r = {}
+            for x, v in gattribs.items():
+                try:
+                    r[x] = self._unpack(x, v, load_values, load_collections, propagate_bypass)
+                except DatabaseMessage.NoUnpack:
+                    pass
         return r
 
     def json_friendly(
@@ -313,8 +321,18 @@ class DatabaseMessage(CoreMessage):
             name)
 
     @classmethod
-    def from_json(cls, msg, ignore_empty=True, skip_updating_existing=True, skip_descriptors=False, _type=None):
+    def from_json(cls, msg, ignore_empty=True, skip_updating_existing=True,
+                  skip_descriptors=False, _type=None,
+                  ignore_private=True, _from_attr=''):
         db_obj = None
+        if not msg:
+            return db_obj
+
+        if not isinstance(msg, dict):
+            raise exceptions.InvalidMessage(
+                utils.this_function(),
+                f"Expected message object on '{_from_attr}' not '{type(msg).__name__}'")
+
         with db.no_autoflush(constants.db_session()) as sess:
             if not cls.db_type and _type is None:
                 raise ValueError("A database type has not been set")
@@ -325,17 +343,53 @@ class DatabaseMessage(CoreMessage):
                 m_keys = set(msg.keys()).difference(set(item_attrs.keys()))
                 raise exceptions.InvalidMessage(
                     utils.this_function(),
-                    f"Message object mismatch. Message contains keys that are not present in the corresponding database item: {m_keys}")
+                    f"Message object mismatch. '{_from_attr}' contains keys that are not present in the corresponding database item: {m_keys}")
 
             if msg:
+                new_obj = True
                 obj_id = msg.get('id', False)
                 if obj_id:
                     db_obj = sess.query(db_type).get(obj_id)
+                    if not db_obj:
+                        raise exceptions.CoreError(utils.this_function(),
+                                                   f"Existing item from message object with id '{obj_id}' was not found")
+                    new_obj = False
                 else:
                     db_obj = db_type()
 
-                if not (obj_id and db_obj and skip_updating_existing):
+                if new_obj and isinstance(db_obj, db.UniqueMixin):
+                    if isinstance(db_obj, db.NameMixin) and msg.get('name') is not None:
+                        db_obj = db_type.as_unique(name=msg.get('name'))
+                        new_obj = bool(db_obj.id)
+                    elif isinstance(db_obj, db.NamespaceTags):
+                        ns_name = None
+                        tag_name = None
+                        try:
+                            ns_name = utils.get_dict_value('namespace.name', msg)
+                            tag_name = utils.get_dict_value('tag.name', msg)
+                        except KeyError:
+                            pass
+                        if ns_name is not None and tag_name is not None:
+                            db_obj = db_type.as_unique(ns=ns_name, tag=tag_name)
+                            new_obj = bool(db_obj.id)
+                    elif isinstance(db_obj, (db.Artist, db.Parody)):
+                        a_names = set()
+                        if msg.get('preferred_name') and msg['preferred_name'].get('name') is not None:
+                            a_names.add(msg['preferred_name']['name'])
+                        if msg.get('names'):
+                            for n in msg['names']:
+                                if n.get('name') is not None:
+                                    a_names.add(n['name'])
+                        if a_names:
+                            db_obj = db_type.as_unique(names=a_names)
+                            new_obj = bool(db_obj.id)
+
+                if db_obj and not (obj_id and db_obj and skip_updating_existing):
                     for attr, value in msg.items():
+                        if attr == 'id':
+                            continue
+                        if ignore_private and attr.startswith('_'):
+                            continue
                         if ignore_empty:
                             if value is None:
                                 continue
@@ -345,7 +399,7 @@ class DatabaseMessage(CoreMessage):
                         cls_attr = item_attrs[attr]
                         if skip_descriptors and db.is_descriptor(cls_attr):
                             continue
-                        obj_attr = getattr(db_obj, attr)
+                        obj_attr = getattr(db_obj, attr) # noqa: F841
                         try:
                             col_model = db.column_model(cls_attr)
                         except TypeError:  # most likely a hybrid_property descriptor
@@ -367,17 +421,25 @@ class DatabaseMessage(CoreMessage):
                             continue
 
                         msg_obj = cls._get_message_object(cls, attr, col_model, check_recursive=False, class_type=True)
+                        if col_model == db.Taggable and isinstance(value, dict):
+                            if db_obj.taggable and db_obj.taggable.id:
+                                value['id'] = db_obj.taggable.id
                         if issubclass(col_model, db.MetaTag):
                             setattr(db_obj, attr, msg_obj._pack_metatags(value))
                         elif db.is_list(cls_attr) or db.is_query(cls_attr):
+                            n_l = []
                             for v in value:
-                                obj_attr.append(
-                                    msg_obj.from_json(
-                                        v,
-                                        _type=col_model,
-                                        ignore_empty=ignore_empty,
-                                        skip_updating_existing=skip_updating_existing,
-                                        skip_descriptors=skip_descriptors))
+                                o = msg_obj.from_json(
+                                    v,
+                                    _type=col_model,
+                                    ignore_empty=ignore_empty,
+                                    skip_updating_existing=skip_updating_existing,
+                                    skip_descriptors=skip_descriptors,
+                                    _from_attr=_from_attr + '.' + attr if _from_attr else attr,
+                                )
+                                if o is not None:
+                                    n_l.append(o)
+                            setattr(db_obj, attr, n_l)
                         elif db.is_descriptor(cls_attr):
                             if db.descriptor_has_setter(cls_attr):
                                 raise NotImplementedError
@@ -388,6 +450,7 @@ class DatabaseMessage(CoreMessage):
                                 msg_obj.from_json(
                                     value,
                                     _type=col_model,
+                                    _from_attr=_from_attr + '.' + attr if _from_attr else attr,
                                     ignore_empty=ignore_empty,
                                     skip_updating_existing=skip_updating_existing,
                                     skip_descriptors=skip_descriptors))
@@ -448,9 +511,6 @@ class DatabaseMessage(CoreMessage):
         if attrib is None:
             return
 
-        if name == "user":
-            return None
-
         if name == "metatags":
             return self._unpack_metatags(attrib)
 
@@ -465,7 +525,8 @@ class DatabaseMessage(CoreMessage):
             msg_obj._properties['force_value_load'] = utils.dict_merge(
                 msg_obj._properties['force_value_load'], self._properties['force_value_load'].get(name, {}))
             msg_obj._properties['exclusions'] = self._properties['exclusions'].get(name, {})
-            msg_obj._detached = self._detached
+            if self._detached:
+                msg_obj._detached = self._detached
             msg_obj._msg_path = self._msg_path.copy()
             # note: don't pass load_collections here. use the force_value_load param
             return msg_obj.data(load_values=load_values, bypass_exclusions=propagate_bypass,
@@ -482,7 +543,7 @@ class DatabaseMessage(CoreMessage):
                 return [self._unpack(name, x, load_values, load_collections, propagate_bypass)
                         for x in attrib.all()]
             else:
-                return []
+                raise DatabaseMessage.NoUnpack
 
         elif isinstance(attrib, enum.Enum):
             return attrib.name
@@ -523,14 +584,20 @@ class Gallery(DatabaseMessage):
     def from_json(cls, msg, ignore_empty=True, skip_updating_existing=True, skip_descriptors=False, **kwargs):
         pref_title = msg.pop('preferred_title', False)
         obj = super().from_json(msg, ignore_empty, skip_updating_existing, skip_descriptors, **kwargs)
-        if not skip_descriptors and pref_title:
-            for mt in msg.get('titles', []):
-                if utils.compare_json_dicts(mt, pref_title):
-                    break
-            else:
-                t = Title.from_json(pref_title, ignore_empty=ignore_empty, skip_updating_existing=skip_updating_existing,
-                                    skip_descriptors=skip_descriptors, **kwargs)
-                setattr(obj, 'preferred_title', t)
+        with db.no_autoflush(db.object_session(obj) or constants.db_session()):
+            if not skip_descriptors and pref_title:
+                for mt in msg.get('titles', []):
+                    if utils.compare_json_dicts(mt, pref_title):
+                        break
+                else:
+                    t = Title.from_json(pref_title, ignore_empty=ignore_empty, skip_updating_existing=skip_updating_existing,
+                                        skip_descriptors=skip_descriptors, **kwargs)
+                    setattr(obj, 'preferred_title', t)
+
+            if msg.get('pages'):
+                obj.pages.reorder()
+            if (msg.get('grouping') or msg.get('grouping_id')) and obj.grouping:
+                obj.grouping.galleries.reorder()
         return obj
 
 
@@ -568,6 +635,14 @@ class Grouping(DatabaseMessage):
 
     def __init__(self, db_item):
         super().__init__('grouping', db_item)
+
+    @classmethod
+    def from_json(cls, msg, ignore_empty=True, skip_updating_existing=True, skip_descriptors=False, **kwargs):
+        obj = super().from_json(msg, ignore_empty, skip_updating_existing, skip_descriptors, **kwargs)
+        with db.no_autoflush(db.object_session(obj) or constants.db_session()):
+            if msg.get('galleries'):
+                obj.galleries.reorder()
+        return obj
 
 
 class Taggable(DatabaseMessage):
@@ -616,6 +691,12 @@ class Tag(DatabaseMessage):
         assert isinstance(nstag, db.NamespaceTags) or nstag is None
         super().__init__('tag', db_item)
         self.nstag = nstag
+
+    def data(self, *args, **kwargs):
+        d = super().data(*args, **kwargs)
+        if self.nstag:
+            d['id'] = self.nstag.id
+        return d
 
 
 class Namespace(DatabaseMessage):
@@ -783,7 +864,8 @@ class GalleryFS(CoreMessage):
                                             load_collections=self._kwargs.get('load_collections', False),
                                             propagate_bypass=self._kwargs.get('propagate_bypass', False),
                                             force_value_load=("taggable.tags",
-                                                              "pages",))
+                                                              "pages",
+                                                              "collections",))
         d = {'sources': self._gfs.get_sources(),
              'page_count': len(self._gfs.pages),
              'metadata_from_file': self._gfs.metadata_from_file,

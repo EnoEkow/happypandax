@@ -7,7 +7,8 @@ from src.ui import ui
 from src.i18n import tr
 from src.state import state
 from src.client import ItemType, client
-from src.single import tagitem, circleitem
+from src.props import artistprops
+from src.single import tagitem
 from org.transcrypt.stubs.browser import __pragma__
 __pragma__('alias', 'as_', 'as')
 
@@ -18,9 +19,19 @@ JSON = Math = console = alert = requestAnimationFrame = None
 __pragma__('noskip')
 
 
+def artist_favorite(e, d):
+    if this.props.edit_mode:
+        e.preventDefault()
+        this.update_data(bool(d.rating), "metatags.favorite")
+    elif this.props.on_favorite:
+        this.props.on_favorite(e, d)
+
+
 def get_tags(data=None, error=None):
     if data is not None and not error:
-        this.setState({"tags": data})
+        this.setState({"tags": data, "loading_tags": False})
+        if this.props.on_tags:
+            this.props.on_tags(data)
     elif error:
         state.app.notif("Failed to fetch tags ({})".format(this.props.id), level="error")
     else:
@@ -29,6 +40,7 @@ def get_tags(data=None, error=None):
         if data:
             id = data.id
         if id:
+            this.setState({"loading_tags": True})
             client.call_func("get_common_tags", this.get_tags,
                              item_type=this.state.item_type,
                              item_id=id, limit=10)
@@ -44,9 +56,10 @@ def get_gallery_count(data=None, error=None):
         data = this.props.data or this.state.data
         if data:
             id = data.id
-        client.call_func("get_related_count", this.get_gallery_count,
-                         item_type=this.state.item_type,
-                         item_id=id, related_type=ItemType.Gallery)
+        if id:
+            client.call_func("get_related_count", this.get_gallery_count,
+                             item_type=this.state.item_type,
+                             item_id=id, related_type=ItemType.Gallery)
 
 
 __pragma__("tconv")
@@ -61,13 +74,16 @@ def artistprops_render():
     circles = []
 
     if data:
-        if data.names:
-            name = data.names[0].js_name
-        if data.metatags.favorite:
+        if data.preferred_name:
+            name = data.preferred_name.js_name
+        elif data.names and len(data.names):
+            name = data.names[0]
+        if data.metatags and data.metatags.favorite:
             fav = 1
 
-        for u in data.urls:
-            urls.append(u.js_name)
+        if data.urls:
+            for u in data.urls:
+                urls.append(u.js_name)
 
         if data.circles:
             for c in data.circles:
@@ -95,11 +111,15 @@ def artistprops_render():
                   e(ui.Table.Cell, e(ui.Header, name, size="medium"), colSpan="2", textAlign="center",
                     verticalAlign="middle")))
 
-    if circles:
+    if circles or this.props.edit_mode:
         rows.append(e(ui.Table.Row,
                       e(ui.Table.Cell, e(ui.Header, tr(this, "ui.t-circle", "Circle") +
                                          ":", size="tiny", className="sub-text"), collapsing=True),
-                      e(ui.Table.Cell, *(e(circleitem.CircleLabel, data=x) for x in circles))))
+                      e(ui.Table.Cell, e(artistprops.Circles,
+                                         data=circles,
+                                         update_data=this.update_data,
+                                         data_key="circles",
+                                         edit_mode=this.props.edit_mode))))
 
     rows.append(e(ui.Table.Row,
                   e(ui.Table.Cell, e(ui.Header, tr(this, "ui.t-galleries", "Galleries") +
@@ -126,7 +146,7 @@ def artistprops_render():
 
     return e(ui.Grid,
              e(ui.Grid.Row,
-                 e(ui.Grid.Column, e(ui.Rating, icon="heart", size="huge", rating=fav),
+                 e(ui.Grid.Column, e(ui.Rating, icon="heart", size="huge", rating=fav, onRate=this.favorite),
                    floated="left", verticalAlign="middle", width=2),
                  e(ui.Grid.Column,
                    e(ui.Button.Group,
@@ -159,6 +179,7 @@ def artistprops_render():
                                     *tag_lbl
                                     ),
                                   basic=True,
+                                  loading=this.state.loading_tags,
                                 ),
                               width=16), columns=1),
              *slider_el,
@@ -174,9 +195,13 @@ ArtistProps = createReactClass({
         'tags': this.props.tags,
         'item_type': ItemType.Artist,
         'gallery_count': 0,
+        'loading_tags': False,
+        'new_data': {},
     },
 
+    'update_data': utils.update_data,
     'get_tags': get_tags,
+    'favorite': artist_favorite,
     'get_gallery_count': get_gallery_count,
 
 

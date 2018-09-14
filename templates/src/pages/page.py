@@ -15,16 +15,43 @@ __pragma__('skip')
 require = window = require = setInterval = setTimeout = setImmediate = None
 clearImmediate = clearInterval = clearTimeout = this = document = None
 JSON = Math = console = alert = requestAnimationFrame = None
+js_undefined = location = localStorage = sessionStorage = None
+screen = Object = Date = None
 __pragma__('noskip')
 
 
-def PageNav(props):
+def pagenav_render():
     els = []
+    props = this.props
+
     if props.number > 1:
-        els.append(e(ui.Button, icon="arrow left", as_=Link, to=props.p_url))
-    els.append(e(ui.Button, str(props.number) + "/" + str(props.count) if props.count else props.number))
+        els.append(e(ui.Button, icon="long arrow alternate left", as_=Link, to=props.p_url))
+
+    curr_page_txt = str(props.number) + "/" + str(props.count) if props.count else props.number
+
+    els.append(e(ui.Popup,
+                 e(ui.Form,
+                   e(ui.Form.Field,
+                     e(ui.Input,
+                       onChange=this.on_page_input,
+                       size="mini",
+                       js_type="number",
+                       placeholder=props.number,
+                       action=e(ui.Button, js_type="submit", compact=True,
+                                icon="share",
+                                onClick=this.go_to_page),
+                       min=1, max=str(props.count) if props.count else props.number),
+                     ),
+                   onSubmit=this.go_to_page
+                   ),
+                 on="click",
+                 hoverable=True,
+                 position="top center",
+                 trigger=e(ui.Button, curr_page_txt, basic=True))
+               )
+
     if props.number < props.count and props.n_url:
-        els.append(e(ui.Button, icon="arrow right", as_=Link, to=props.n_url))
+        els.append(e(ui.Button, icon="long arrow alternate right", as_=Link, to=props.n_url))
 
     return e(ui.Grid.Row,
              e(ui.Grid.Column,
@@ -33,6 +60,20 @@ def PageNav(props):
                ),
              columns=1
              )
+
+
+PageNav = createReactClass({
+    'displayName': 'PageNav',
+
+    'getInitialState': lambda: {
+        'go_to_page': None,
+    },
+
+    'on_page_input': lambda e, d: this.setState({'go_to_page': d.value}),
+    'go_to_page': lambda: utils.go_to(this.props.history, this.props.get_page_url(this.state.go_to_page)) if this.state.go_to_page and this.props.get_page_url else None,
+
+    'render': pagenav_render,
+}, pure=True)
 
 
 __pragma__("iconv")
@@ -70,7 +111,7 @@ def get_thumbs(data=None, error=None, other=None):
             item_ids = [x.id for x in other]
             client.call_func("get_image", this.get_thumbs,
                              item_ids=item_ids,
-                             size=ImageSize.Original, url=True, uri=True,
+                             size=this.state.image_size, url=True, uri=True,
                              item_type=this.state.item_type)
 
 
@@ -168,6 +209,23 @@ def get_page_url(number, gid=None):
 __pragma__("nokwargs")
 
 
+def get_default_size():
+    w = window.innerWidth
+    s = screen.width
+    if w > 2400 or s > 2400:
+        return ImageSize.Original
+    if w > 1600 or s > 1600:
+        return ImageSize.x2400
+    elif w > 1280 or s > 1600:
+        return ImageSize.x1600
+    elif w > 980:
+        return ImageSize.x1280
+    elif w > 768:
+        return ImageSize.x960
+    else:
+        return ImageSize.x768
+
+
 def go_next():
     if int(this.state.data.number) < int(this.state.page_count):
         utils.go_to(this.props.history, this.get_page_url(this.state.data.number + 1))
@@ -202,6 +260,17 @@ def on_key(ev):
     elif ev.key in ("ArrowLeft", "a"):
         ev.preventDefault()
         this.go_left()
+
+
+def update_metatags(mtags):
+    if this.state.data:
+        client.call_func("update_metatags", None, item_type=this.state.item_type,
+                         item_id=this.state.data.id, metatags=mtags)
+        d = this.state.data
+        d.metatags = dict(d.metatags)
+        d.metatags.update(mtags)
+        d = utils.JSONCopy(d)
+        this.setState({'data': d})
 
 
 def on_canvas_click(ev):
@@ -296,7 +365,7 @@ def page_render():
               img=img,
               item_id=p_id,
               item_type=this.state.item_type,
-              size_type=ImageSize.Original,
+              size_type=this.state.image_size,
               centered=True,
               fluid=False,
               bordered=True,
@@ -309,7 +378,7 @@ def page_render():
     rows = []
 
     rows.append(e(ui.Table.Row,
-                  e(ui.Table.Cell, e(ui.Rating, icon="heart", size="massive", rating=fav),
+                  e(ui.Table.Cell, e(ui.Rating, icon="heart", size="massive", rating=fav, onRate=this.favorite),
                     colSpan="2", collapsing=True)))
     rows.append(e(ui.Table.Row,
                   e(ui.Table.Cell, e(ui.Header, "Tags:", as_="h5"), collapsing=True),
@@ -324,14 +393,23 @@ def page_render():
     # config
 
     cfg_direction = [
-        {'key': 1, 'text': tr(this, "", 'Left to Right'), 'value': ReaderDirection.left_to_right},
-        {'key': 2, 'text': tr(this, "", 'Right to Left'), 'value': ReaderDirection.right_to_left},
+        {'key': 1, 'text': tr(this, "ui.t-left-to-right", 'Left to Right'), 'value': ReaderDirection.left_to_right},
+        {'key': 2, 'text': tr(this, "ui.t-rigt-to-left", 'Right to Left'), 'value': ReaderDirection.right_to_left},
     ]
 
     cfg_scaling = [
-        {'key': 1, 'text': tr(this, "", 'Default'), 'value': ReaderScaling.default},
-        {'key': 2, 'text': tr(this, "", 'Fit Width'), 'value': ReaderScaling.fit_width},
-        {'key': 3, 'text': tr(this, "", 'Fit Height'), 'value': ReaderScaling.fit_height},
+        {'key': 1, 'text': tr(this, "ui.t-default", 'Default'), 'value': ReaderScaling.default},
+        {'key': 2, 'text': tr(this, "ui.t-fit-width", 'Fit Width'), 'value': ReaderScaling.fit_width},
+        {'key': 3, 'text': tr(this, "ui.t-fit-height", 'Fit Height'), 'value': ReaderScaling.fit_height},
+    ]
+
+    cfg_size = [
+        {'key': 1, 'text': tr(this, "ui.t-original", 'Original'), 'value': ImageSize.Original},
+        {'key': 2, 'text': "x2400", 'value': ImageSize.x2400},
+        {'key': 3, 'text': "x1600", 'value': ImageSize.x1600},
+        {'key': 4, 'text': "x1280", 'value': ImageSize.x1280},
+        {'key': 5, 'text': "x960", 'value': ImageSize.x960},
+        {'key': 5, 'text': "x768", 'value': ImageSize.x768},
     ]
 
     return e(ui.Sidebar.Pushable,
@@ -361,15 +439,17 @@ def page_render():
                ),
              e(ui.Sidebar,
                e(ui.Form,
-                 e(ui.Form.Select, options=cfg_direction, label=tr(this, "", "Reading Direction"),
+                 e(ui.Form.Select, options=cfg_direction, label=tr(this, "ui.t-reading-direction", "Reading Direction"),
                    defaultValue=this.state.cfg_direction, onChange=this.set_cfg_direction),
-                 e(ui.Form.Select, options=cfg_scaling, label=tr(this, "", "Scaling"),
+                 e(ui.Form.Select, options=cfg_scaling, label=tr(this, "ui.t-scaling", "Scaling"),
                    defaultValue=this.state.cfg_scaling, onChange=this.set_cfg_scaling),
-                 e(ui.Form.Field, control=ui.Checkbox, label=tr(this, "", "Stretch small pages"), toggle=True,
+                 e(ui.Form.Select, options=cfg_size, label=tr(this, "ui.t-size", "Size"),
+                   defaultValue=this.state.image_size, onChange=this.set_cfg_size),
+                 e(ui.Form.Field, control=ui.Checkbox, label=tr(this, "ui.t-stretch-pages", "Stretch small pages"), toggle=True,
                    defaultChecked=this.state.cfg_strecth, onChange=this.set_cfg_stretch),
-                 e(ui.Form.Field, control=ui.Checkbox, label=tr(this, "", "Invert background color"), toggle=True,
+                 e(ui.Form.Field, control=ui.Checkbox, label=tr(this, "ui.t-invert-bg-color", "Invert background color"), toggle=True,
                    defaultChecked=this.state.cfg_invert, onChange=this.set_cfg_invert),
-                 e(ui.Form.Field, control=ui.Checkbox, label=tr(this, "", "Keep pagelist open"), toggle=True,
+                 e(ui.Form.Field, control=ui.Checkbox, label=tr(this, "ui.t-keep-pagelist-open", "Keep pagelist open"), toggle=True,
                    defaultChecked=this.state.cfg_pagelist_open, onChange=this.set_cfg_pagelist_open),
                  e(ui.Form.Field, "Close", control=ui.Button),
                  onSubmit=this.toggle_config,
@@ -382,13 +462,15 @@ def page_render():
                ),
              e(ui.Sidebar.Pusher,
                  e(PageNav, number=number, count=this.state.page_count,
-                   n_url=n_url, p_url=p_url),
+                   n_url=n_url, p_url=p_url,
+                   get_page_url=this.get_page_url,
+                   history=this.props.history),
                  e(ui.Grid.Row,
                    e(ui.Ref,
                      e(ui.Grid.Column,
                        e(ui.Segment,
                          thumb,
-                         className="no-padding-segment",
+                         className="no-padding-segment force-viewport-size",
                          basic=True,
                          inverted=this.state.cfg_invert,
                          ),
@@ -402,7 +484,9 @@ def page_render():
                    textAlign="center",
                    ),
                  e(PageNav, number=number, count=this.state.page_count,
-                   n_url=n_url, p_url=p_url),
+                   n_url=n_url, p_url=p_url,
+                   get_page_url=this.get_page_url,
+                   history=this.props.history),
                  e(ui.Grid.Row,
                    e(ui.Grid.Column,
                      e(ui.Segment,
@@ -426,6 +510,8 @@ Page = createReactClass({
 
     'get_page_url': get_page_url,
 
+    'get_default_size': get_default_size,
+
     'getInitialState': lambda: {'gid': int(this.props.match.params.gallery_id),
                                 'number': int(this.props.match.params.page_number),
                                 'gallery': None,
@@ -437,6 +523,7 @@ Page = createReactClass({
                                 'data': this.props.data or {},
                                 'tag_data': this.props.tag_data or {},
                                 'item_type': ItemType.Page,
+                                'image_size': utils.storage.get("reader_size", this.get_default_size()),
                                 'loading': True,
                                 'context': None,
                                 'config_visible': False,
@@ -455,6 +542,9 @@ Page = createReactClass({
     'go_left': go_left,
     'go_right': go_right,
     'set_pagelist_ref': lambda r: this.setState({'page_list_ref': r}),
+    'favorite': lambda e, d: all((this.update_metatags({'favorite': bool(d.rating)}),
+                                  e.preventDefault())),
+    'update_metatags': update_metatags,
     'set_thumbs': set_thumbs,
     'get_thumbs': get_thumbs,
     'get_item': get_item,
@@ -466,6 +556,7 @@ Page = createReactClass({
     'back_to_gallery': lambda: utils.go_to(this.props.history, "/item/gallery/{}".format(this.props.match.params.gallery_id), keep_query=False),
 
     'set_cfg_direction': lambda e, d: all((this.setState({'cfg_direction': d.value}), utils.storage.set("reader_direction", d.value))),
+    'set_cfg_size': lambda e, d: all((this.setState({'image_size': d.value}), utils.storage.set("reader_size", d.value))),
     'set_cfg_scaling': lambda e, d: all((this.setState({'cfg_scaling': d.value}), utils.storage.set("reader_scaling", d.value))),
     'set_cfg_stretch': lambda e, d: all((this.setState({'cfg_stretch': d.checked}), utils.storage.set("reader_stretch", d.checked))),
     'set_cfg_invert': lambda e, d: all((this.setState({'cfg_invert': d.checked}), utils.storage.set("reader_invert", d.checked))),
@@ -485,8 +576,8 @@ Page = createReactClass({
     'componentWillMount': lambda: all((this.props.menu([
         e(ui.Menu.Item, e(ui.Icon, js_name="ellipsis vertical", size="large"),
           icon=True, onClick=this.toggle_pages, position="left"),
-        e(ui.Menu.Menu, e(ui.Menu.Item, e(ui.Icon, js_name="arrow up", size="large"), icon=True, as_=Link, to={'pathname': "/item/gallery/{}".format(this.props.match.params.gallery_id),
-                                                                                                               'state': {'gallery': this.state.gallery}})),
+        e(ui.Menu.Menu, e(ui.Menu.Item, e(ui.Icon, js_name="level up alternate", size="large"), icon=True, as_=Link, to={'pathname': "/item/gallery/{}".format(this.props.match.params.gallery_id),
+                                                                                                                         'state': {'gallery': this.state.gallery}})),
         e(ui.Menu.Item, e(ui.Icon, js_name="options", size="large"),
           icon=True, onClick=this.toggle_config, position="right"),
     ]),

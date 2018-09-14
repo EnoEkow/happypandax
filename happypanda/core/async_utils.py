@@ -50,6 +50,11 @@ class Greenlet(gevent.Greenlet):
             greenlet.locals = {}
 
 
+def _daemon():
+    while True:
+        gevent.sleep(0.1)
+
+
 class CPUThread():
     """
     Manages a single worker thread to dispatch cpu intensive tasks to.
@@ -60,9 +65,10 @@ class CPUThread():
     instead of polling to handle inter-thread communication.
     """
 
-    _thread = None
+    _threads = []
 
-    def __init__(self):
+    def __init__(self, name=""):
+        self.name = name
         self.in_q = collections.deque()
         self.out_q = collections.deque()
         self.in_async = None
@@ -76,6 +82,8 @@ class CPUThread():
         # start running thread / greenlet after everything else is set up
         self.worker.start()
         self.notifier = gevent.spawn(self._notify)
+        self.worker_count = 0
+        self.last_worker_start = arrow.now()
 
     def _run(self):
         # in_cpubound_thread is sentinel to prevent double thread dispatch
@@ -85,9 +93,6 @@ class CPUThread():
         try:
             self.in_async = gevent.get_hub().loop.async()
 
-            def _daemon():
-                while True:
-                    gevent.sleep(0.1)
             daemon_gevent = gevent.spawn(_daemon)
             self.in_q_has_data = gevent.event.Event()
             self.in_async.start(self.in_q_has_data.set)
@@ -101,12 +106,12 @@ class CPUThread():
                 # FIFO for now
                 jobid, func, args, kwargs = self.in_q.popleft()
                 start_time = arrow.now()
-                log.d("Running function in cpu_bound thread:", func)
+                log.d(f"Running function in {self.name}: {func}")
                 try:
                     with db.cleanup_session():
                         self.results[jobid] = func(*args, **kwargs)
                 except Exception as e:
-                    log.exception("Exception raised in cpubound_thread:")
+                    log.exception(f"Exception raised in {self.name}:")
                     self.results[jobid] = self._Caught(e)
                 finished_time = arrow.now()
                 run_delta = finished_time - start_time
@@ -128,7 +133,10 @@ class CPUThread():
         while not self.in_async:
             gevent.sleep(0.01)  # poll until worker thread has initialized
         self.in_async.send()
+        self.worker_count += 1
+        self.last_worker_start = arrow.now()
         done.wait()
+        self.worker_count -= 1
         res = self.results[done]
         del self.results[done]
         if isinstance(res, self._Caught):
@@ -197,9 +205,22 @@ def defer(f=None, predicate=None):
         return p_wrap
     else:
         def f_wrap(f, *args, **kwargs):
-            if CPUThread._thread is None:
-                CPUThread._thread = CPUThread()
-            return CPUThread._thread.apply(f, args, kwargs)
+            if not CPUThread._threads:
+                for x in range(constants.maximum_cpu_threads):
+                    CPUThread._threads.append(CPUThread(f"cpu thread {x}"))
+            cpu_threads_by_count = sorted(CPUThread._threads,
+                                          key=lambda c: c.worker_count) if CPUThread._threads else []
+            cpu_threads_by_time = sorted(cpu_threads_by_count, reverse=True, key=lambda c: c.last_worker_start)
+            if cpu_threads_by_count and cpu_threads_by_time:
+                cpu_thread = cpu_threads_by_count[0]
+                if cpu_thread.worker_count:
+                    cpu_thread = cpu_threads_by_time[0]
+
+                log.d(f"Putting function in {cpu_thread.name}: {f}")
+                r = cpu_thread.apply(f, args, kwargs)
+            else:
+                r = f(*args, **kwargs)
+            return r
 
         @functools.wraps(f)
         def wrapper(*args, **kwargs):
@@ -209,7 +230,6 @@ def defer(f=None, predicate=None):
                 v = f(*args, **kwargs)
                 a._value = v
             else:
-                log.d("Putting function in cpu_bound thread:", f)
                 g = Greenlet(f_wrap, f, *args, **kwargs)
                 g.start()
                 a._future = g

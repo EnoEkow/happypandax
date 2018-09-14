@@ -15,7 +15,7 @@ from sqlalchemy_utils.functions import make_order_by_deterministic
 from happypanda.common import utils, hlogger, exceptions, constants, config
 from happypanda.core.command import Command, CommandEvent, AsyncCommand, CommandEntry, CParam
 from happypanda.core.commands import io_cmd
-from happypanda.core import db, async_utils
+from happypanda.core import db, async_utils, db_cache
 from happypanda.interface import enums
 from happypanda.interface.enums import ItemSort
 
@@ -581,6 +581,8 @@ class GetModelItems(Command):
         order_by: either a textual SQL criterion or a database model item attribute (can also be a tuple)
         group_by: either a textual SQL criterion or a database model item attribute (can also be a tuple)
         join: either a textual SQL criterion or a database model item attribute (can also be a tuple)
+        count: return count of items
+        cache: cache results
 
     Returns:
         a tuple of database model items or ``int`` if ``count`` was set to true
@@ -604,6 +606,7 @@ class GetModelItems(Command):
         super().__init__()
 
         self.fetched_items = tuple()
+        self.cache = True
 
     def _query(self, q, limit, offset):
         if offset:
@@ -612,7 +615,12 @@ class GetModelItems(Command):
         if limit:
             q = q.limit(limit)
 
+        self._invalidate_query(q)
         return q.all()
+
+    def _invalidate_query(self, q):
+        if self.cache and constants.invalidator.dirty_database:
+            q.invalidate()
 
     def _get_sql(self, expr):
         if isinstance(expr, str):
@@ -621,12 +629,14 @@ class GetModelItems(Command):
             return expr
 
     def _get_count(self, q):
+        self._invalidate_query(q)
         return q.count()
 
     def main(self, model: db.Base, ids: set = None, limit: int = 999,
              filter: str = None, order_by: str = None, group_by: str=None,
              offset: int = 0, columns: tuple = tuple(),
-             join: str = None, count: bool = False) -> typing.Union[tuple, int]:
+             join: str = None, count: bool = False, cache=True) -> typing.Union[tuple, int]:
+        self.cache = cache
         if ids is None:
             log.d("Fetching items", "offset:", offset, "limit:", limit)
         else:
@@ -650,6 +660,9 @@ class GetModelItems(Command):
             q = s.query(*columns)
         else:
             q = s.query(model)
+
+        if cache:
+            q.options(db_cache.FromCache('db'))
 
         if join is not None:
             criteria = True
@@ -679,15 +692,16 @@ class GetModelItems(Command):
             _max_variables = 900
             if id_amount > _max_variables and config.dialect.value == constants.Dialect.SQLITE:
                 if count:
-                    fetched_list = [x for x in q.all() if x[0] in ids]
+                    fetched_list = [x for x in self._query(q, None, None) if x[0] in ids]
                 else:
-                    fetched_list = [x for x in q.all() if x.id in ids]
+                    fetched_list = [x for x in self._query(q, None, None) if x.id in ids]
                     if not limit:
                         limit = len(fetched_list)
                     fetched_list = fetched_list[offset:][:limit]
 
                 self.fetched_items = tuple(fetched_list) if not count else len(fetched_list)
             elif id_amount == 1 and (not columns and not criteria):
+                self._invalidate_query(q)
                 self.fetched_items = (q.get(ids.pop()),) if not count else self._get_count(q)
             else:
                 q = q.filter(model.id.in_(ids))
@@ -722,7 +736,7 @@ class MostCommonTags(Command):
         assert issubclass(model, (db.Artist, db.Grouping, db.Collection))
 
         s = constants.db_session()
-        r = s.query(db.NamespaceTags).join(
+        q = s.query(db.NamespaceTags).join(
             db.Taggable.tags).filter(
             db.Taggable.id.in_(
                 s.query(
@@ -730,7 +744,11 @@ class MostCommonTags(Command):
                     model.galleries).filter(
                     model.id == item_id))
         ).group_by(db.NamespaceTags).order_by(
-            db.desc_expr(db.func.count(db.NamespaceTags.id))).limit(limit).all()
+            db.desc_expr(db.func.count(db.NamespaceTags.id))).limit(limit)
+        q.options(db_cache.FromCache('db'))
+        if constants.invalidator.dirty_database:
+            q.invalidate()
+        r = q.all()
         return tuple(r)
 
 
@@ -742,7 +760,7 @@ def _get_add_item_options():
 
 class AddItem(AsyncCommand):
     """
-    Add a database item
+    Add database items
     """
 
     @async_utils.defer
@@ -772,16 +790,59 @@ class AddItem(AsyncCommand):
         if not isinstance(items, (list, tuple)):
             items = [items]
         self.set_progress(type_=enums.ProgressType.ItemAdd)
-        self.set_max_progress(len(items))
+        self.set_max_progress(len(items) + 1)
         item_options = _get_add_item_options()
         item_options.update(options)
         self._add_to_db(items, item_options).get()
+        self.next_progress()
         return True
+
+
+def _get_upd_item_options():
+    return {
+    }
 
 
 def _get_del_item_options():
     return {
     }
+
+
+class UpdateItem(AsyncCommand):
+    """
+    Update database items
+    """
+
+    @async_utils.defer
+    def _update(self, items, options):
+        with db.safe_session() as sess:
+            with db.no_autoflush(sess):
+                obj_types = set()
+                for i in items:
+                    if not i.id:
+                        raise exceptions.CoreError(utils.this_function(), "Cannot update an item without an id")
+                    if isinstance(i, io_cmd.GalleryFS):
+                        i = i.gallery
+                    obj_types.add(type(i))
+                    i_sess = db.object_session(i)
+                    if i_sess and i_sess != sess:
+                        i_sess.expunge_all()  # HACK: what if other sess was in use?
+                    sess.add(i)
+                    self.next_progress()
+                sess.commit()
+                if db.Gallery in obj_types:
+                    constants.invalidator.similar_gallery = True
+
+    def main(self, items: typing.List[typing.Union[db.Base, io_cmd.GalleryFS]], options: dict={}) -> bool:
+        assert isinstance(items, (list, tuple, db.Base, io_cmd.GalleryFS)), f"not {items}"
+        if not isinstance(items, (list, tuple)):
+            items = [items]
+        self.set_progress(type_=enums.ProgressType.ItemAdd)
+        self.set_max_progress(len(items))
+        item_options = _get_add_item_options()
+        item_options.update(options)
+        self._update(items, item_options).get()
+        return True
 
 # class DeleteItem(AsyncCommand):
 #    """

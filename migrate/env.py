@@ -8,8 +8,8 @@ import sys
 
 sys.path.insert(0, os.getcwd())
 
-from happypanda.common import constants, config as hpx_config # noqa: E402
-from happypanda.core import db # noqa: E402
+from happypanda.common import constants, config as hpx_config  # noqa: E402
+from happypanda.core import db  # noqa: E402
 
 USE_TWOPHASE = False
 
@@ -130,7 +130,8 @@ def run_migrations_online():
                 upgrade_token="%s_upgrades" % name,
                 downgrade_token="%s_downgrades" % name,
                 target_metadata=target_metadata.get(name),
-                process_revision_directives=process_revision_directives
+                process_revision_directives=process_revision_directives,
+                render_as_batch=True
             )
             context.run_migrations(engine_name=name)
 

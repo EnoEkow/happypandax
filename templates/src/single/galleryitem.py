@@ -7,6 +7,7 @@ from src.state import state
 from src.ui import ui
 from src.client import (ItemType, ImageSize, client)
 from src.single import thumbitem
+from src.selectors import filterselector
 from src.propsviews import gallerypropsview
 from src.i18n import tr
 from org.transcrypt.stubs.browser import __pragma__
@@ -73,6 +74,16 @@ def get_item(data=None, error=None):
             client.call_func("get_item", this.get_item, item_type=item, item_id=item_id)
 
 
+def gallery_rate(e, d):
+    e.preventDefault()
+    rating = d.rating
+    if this.state.data.id:
+        client.call_func("update_item", item_type=this.state.item_type,
+                         item={'id': this.state.data.id, 'rating': rating})
+    this.setState({'data': utils.update_object("rating", this.state.data, rating)})
+    this.get_item()
+
+
 def gallery_render():
     fav = 0
     title = ""
@@ -82,6 +93,8 @@ def gallery_render():
     item_id = this.state.id
     inbox = False
     data = this.state.data
+    read_mtag = False
+    later_mtag = False
 
     if data:
         if data.rating:
@@ -90,6 +103,8 @@ def gallery_render():
             title = data.preferred_title.js_name
         if data.metatags:
             inbox = data.metatags.inbox
+            read_mtag = data.metatags.read
+            later_mtag = data.metatags.readlater
 
             if data.metatags.favorite:
                 fav = 1
@@ -151,51 +166,104 @@ def gallery_render():
     if inbox:
         menu_options.append(e(ui.List.Item, content=tr(
             this, "ui.b-send-library", "Send to library"), onClick=this.send_to_library, icon="grid layout"))
-    menu_options.append(e(ui.List.Item, content=tr(this, "ui.b-add-to-filter", "Add to filter"), icon="filter"))
+    menu_options.append(e(ui.List.Item, content=tr(this, "ui.b-add-to-filter", "Add to filter"),
+                          icon="filter", onClick=this.toggle_filter))
     menu_options.append(e(ui.List.Item, content=tr(this, "ui.b-add-to-collection",
                                                    "Add to collection"), icon="plus square outline"))
     menu_options.append(e(ui.List.Item, content=tr(this, "ui.b-add-to-series", "Add to series"), icon="add square"))
     menu_options.append(e(ui.List.Item, content=tr(this, "ui.b-send-trash", "Send to Trash"),
                           icon="trash", onClick=this.send_to_trash))
 
+    add_to_filter_el = e(ui.Modal,
+                         content=e(filterselector.FilterSelector,
+                                   item_type=this.state.item_type,
+                                   item_id=item_id,
+                                   ),
+                         dimmer="inverted",
+                         size="small",
+                         closeOnDocumentClick=True,
+                         centered=False,
+                         closeIcon=True,
+                         open=this.state.filter_open,
+                         onClose=this.toggle_filter,
+                         actions=[{'content': tr(this, "ui.b-close", "close")}]
+                         )
+
+    a_names = artist_names
+
     return e(ui.Card,
+             add_to_filter_el,
              e(ui.Dimmer.Dimmable,
                  h("div",
                    thumb,
                    e(ui.Rating, icon="heart", onRate=this.favorite, size="massive",
                      className="card-item top left above-dimmer", rating=fav),
-                   *([e(ui.Icon,
-                        js_name="inbox",
-                        title=tr(this, "ui.t-inboxed-gallery", "This gallery is in your inbox"),
-                        bordered=True,
-                        inverted=True,
-                        className="card-item top right above-dimmer")] if inbox else []),
                    e(ui.Popup,
-                     e(ui.Rating, icon="star", defaultRating=rating, maxRating=10, clearable=True, className=""),
+                     e(ui.Rating,
+                       onRate=this.rate,
+                       icon="star",
+                       defaultRating=rating,
+                       maxRating=10,
+                       clearable=True,
+                       className=""),
                      trigger=e(
                          ui.Label,
                          rating,
                          className="card-item bottom left above-dimmer",
-                         size="large",
-                         color="yellow",
+                         size="small",
+                         color="orange",
+                         basic=True,
                          as_="a"),
-                       hoverable=True,
-                       on="click",
-                       hideOnScroll=True,
-                       position="left center",
+                     hoverable=True,
+                     on="click",
+                     hideOnScroll=True,
+                     position="left center",
                      ),
-                   e(ui.Popup,
-                     e(ui.List, *menu_options, selection=True, relaxed=True),
-                       trigger=e(ui.Icon,
-                                 js_name="ellipsis vertical",
-                                 bordered=True,
-                                 link=True,
-                                 className="card-item bottom right above-dimmer",
-                                 inverted=True),
-                       hoverable=True,
-                       on="click",
-                       hideOnScroll=True,
-                       position="right center",
+                   h("div",
+                       *([e(ui.Icon,
+                            js_name="inbox",
+                            title=tr(this, "ui.t-inboxed-gallery", "This gallery is in your inbox"),
+                            bordered=True,
+                            inverted=True,
+                            size="small",
+                            link=True,
+                            )] if inbox else []),
+                       *([e(ui.Icon,
+                            js_name="bookmark",
+                            title=tr(this, "ui.b-save-later", "Save for later"),
+                            bordered=True,
+                            inverted=True,
+                            size="small",
+                            link=True,
+                            )] if later_mtag else []),
+                       *([e(ui.Icon,
+                            js_name="eye slash outline",
+                            title=tr(this, "ui.t-unread-gallery", "This gallery has not been read yet"),
+                            bordered=True,
+                            inverted=True,
+                            size="small",
+                            link=True,
+                            )] if not read_mtag else []),
+                       className="card-item top right above-dimmer",
+                     ),
+                   h("div",
+                       e(ui.Popup,
+                         e(ui.List, *menu_options, selection=True, relaxed=True),
+                           trigger=e(ui.Icon,
+                                     js_name="ellipsis vertical",
+                                     bordered=True,
+                                     link=True,
+                                     inverted=True,
+                                     onClick=this.toggle_options,
+                                     ),
+                           hoverable=True,
+                           on="click",
+                           hideOnScroll=True,
+                           position="right center",
+                           open=this.state.options_open,
+                           onClose=this.toggle_options,
+                         ),
+                       className="card-item bottom right above-dimmer",
                      ),
                    className="card-content",
                    ),
@@ -208,14 +276,14 @@ def gallery_render():
                  e(gallerypropsview.GalleryProps,
                    compact=True,
                    data=data,
-                   rating=rating,
                    tags=this.state.tags,
                    on_tags=this.on_tags,
+                   on_rate=this.rate,
                    size="small"),
                  ),
                trigger=e(ui.Card.Content,
                          e(ui.Card.Header, title, className="text-ellipsis card-header"),
-                         e(ui.Card.Meta, *[h("span", x) for x in artist_names], className="text-ellipsis"),
+                         e(ui.Card.Meta, *[h("span", x) for x in a_names], className="text-ellipsis"),
                          ),
                # dimmer="inverted",
                size="small",
@@ -237,6 +305,8 @@ Gallery = createReactClass({
                                 'item_type': ItemType.Gallery,
                                 'tags': this.props.tags,
                                 'dimmer': False,
+                                'options_open': False,
+                                'filter_open': False,
                                 },
     'open_external': open_external,
 
@@ -247,7 +317,7 @@ Gallery = createReactClass({
     'on_tags': on_tags,
     'update_metatags': update_metatags,
     'get_item': get_item,
-
+    'rate': gallery_rate,
     'favorite': lambda e, d: all((this.update_metatags({'favorite': bool(d.rating)}),
                                   this.get_item(),
                                   e.preventDefault())),
@@ -264,6 +334,8 @@ Gallery = createReactClass({
     'read_later': lambda e, d: all((this.update_metatags({'readlater': True}),
                                     e.preventDefault())),
 
+    'toggle_options': lambda: this.setState({'options_open': not this.state.options_open}),
+    'toggle_filter': lambda: all((this.setState({'filter_open': not this.state.filter_open}), this.toggle_options() if this.state.options_open else None)),
     'dimmer_show': lambda: this.setState({'dimmer': True}),
     'dimmer_hide': lambda: this.setState({'dimmer': False}),
 

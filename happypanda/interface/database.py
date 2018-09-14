@@ -112,9 +112,9 @@ def new_item(item_type: enums.ItemType=enums.ItemType.Gallery,
     """
 
     if not item:
-        raise exceptions.APIError(utils.this_function(), "item must be a message object")
+        raise exceptions.APIError(utils.this_function(), "Item must be a message object")
     if item.get('id', False) and not constants.dev:
-        raise exceptions.APIError(utils.this_function(), "cannot create item with an id")
+        raise exceptions.APIError(utils.this_function(), "Cannot create item with an id")
 
     item_type = enums.ItemType.get(item_type)
     db_msg, db_model = item_type._msg_and_model()
@@ -123,6 +123,35 @@ def new_item(item_type: enums.ItemType=enums.ItemType.Gallery,
 
     cmd_id = database_cmd.AddItem(services.AsyncService.generic).run(db_obj, options=options)
     return message.Identity('command_id', cmd_id)
+
+
+def update_item(item_type: enums.ItemType=enums.ItemType.Gallery,
+                item: dict={},
+                options: dict={}):
+    """
+    Update an existing item
+
+    Args:
+        item_type: type of item to create
+        item: item messeage object
+
+    Returns:
+        bool indicating whether item was updated
+
+    """
+
+    if not item:
+        raise exceptions.APIError(utils.this_function(), "Item must be a message object")
+    if not item.get('id'):
+        raise exceptions.APIError(utils.this_function(), "Item must have a valid id")
+
+    item_type = enums.ItemType.get(item_type)
+    db_msg, db_model = item_type._msg_and_model()
+
+    db_obj = db_msg.from_json(item, ignore_empty=False, skip_updating_existing=False)
+
+    status = database_cmd.UpdateItem().main(db_obj, options=options)
+    return message.Identity('status', status)
 
 
 def get_item(item_type: enums.ItemType=enums.ItemType.Gallery,
@@ -229,6 +258,8 @@ def get_related_items(item_type: enums.ItemType=enums.ItemType.Gallery,
                 ...
             ]
     """
+    if not item_id:
+        raise exceptions.APIError(utils.this_function(), "item_id must be a valid item id")
     item_type = enums.ItemType.get(item_type)
     related_type = enums.ItemType.get(related_type)
 
@@ -298,6 +329,8 @@ def get_related_count(item_type: enums.ItemType=enums.ItemType.Gallery,
                 'count' : int
             }
     """
+    if not item_id:
+        raise exceptions.APIError(utils.this_function(), "item_id must be a valid item id")
     item_type = enums.ItemType.get(item_type)
     related_type = enums.ItemType.get(related_type)
 
@@ -317,17 +350,17 @@ def get_related_count(item_type: enums.ItemType=enums.ItemType.Gallery,
     return message.Identity('count', {'id': item_id, 'count': count})
 
 
-def search_item(item_type: enums.ItemType=enums.ItemType.Gallery,
-                search_query: str = "",
-                search_options: dict = {},
-                sort_by: enums.ItemSort = None,
-                sort_desc: bool=False,
-                full_search: bool=True,
-                limit: int=100,
-                offset: int=None,
-                ):
+def search_items(item_type: enums.ItemType=enums.ItemType.Gallery,
+                 search_query: str = "",
+                 search_options: dict = {},
+                 sort_by: enums.ItemSort = None,
+                 sort_desc: bool=False,
+                 full_search: bool=True,
+                 limit: int=100,
+                 offset: int=None,
+                 ):
     """
-    Search for item
+    Search for items
 
     Args:
         item_type: all of :py:attr:`.ItemType` except :py:attr:`.ItemType.Page` and :py:attr:`.ItemType.GalleryFilter`
@@ -415,6 +448,8 @@ def update_metatags(item_type: enums.ItemType=enums.ItemType.Gallery,
     Returns:
         bool indicating whether metatags were updated
     """
+    if not item_id:
+        raise exceptions.APIError(utils.this_function(), "item_id must be a valid item id")
 
     item_type = enums.ItemType.get(item_type)
 
@@ -437,8 +472,12 @@ def update_metatags(item_type: enums.ItemType=enums.ItemType.Gallery,
             raise exceptions.APIError(utils.this_function(), f"Metatag name '{m}' does not exist")
         mtags[m] = v
 
-    t.update("metatags", mtags)
+    st = True
+    if t:
+        t.update("metatags", mtags)
 
-    db.object_session(t).commit()
+        db.object_session(t).commit()
+    else:
+        st = False
 
-    return message.Identity('status', True)
+    return message.Identity('status', st)

@@ -93,6 +93,17 @@ __pragma__("nokwargs")
 def itemviewpage_update(p_p, p_s):
 
     if any((
+        p_s.view_type != this.state.view_type,
+        p_p.view_type != this.props.view_type,
+        p_s.item_type != this.state.item_type,
+        p_s.filter_id != this.state.filter_id,
+        p_s.sort_desc != this.state.sort_desc,
+        p_s.sort_idx != this.state.sort_idx,
+        p_s.visible_config != this.state.visible_config and this.state.visible_config,
+    )):
+        utils.scroll_to_top()
+
+    if any((
         p_p.view_type != this.props.view_type,
     )):
         this.setState({'view_type': this.default_view()})
@@ -128,7 +139,7 @@ def itemviewpage_render():
              toggle_config=this.toggle_config,
              visible_config=this.state.visible_config,
              config_suffix=this.config_suffix,
-             )
+             ),
 
 
 ItemViewPage = createReactClass({
@@ -136,7 +147,7 @@ ItemViewPage = createReactClass({
 
     'config_suffix': "main",
 
-    'default_view': lambda: this.props.view_type or int(utils.get_query("view_type", utils.storage.get("def_view_type" + this.config_suffix, ViewType.Library))),
+    'default_view': lambda: this.props.view_type or int(utils.get_query("view_type", utils.session_storage.get('view_type', utils.storage.get("def_view_type" + this.config_suffix, ViewType.Library)))),
     'toggle_config': lambda a: this.setState({'visible_config': not this.state.visible_config}),
 
     'on_item_change': lambda e, d: all((this.setState({'item_type': d.value,
@@ -148,7 +159,7 @@ ItemViewPage = createReactClass({
                                         utils.session_storage.set("sort_idx_{}".format(this.state.item_type), d.value))),
 
     'on_view_change': lambda e, d: all((this.setState({'view_type': d.value}),
-                                        utils.session_storage.set("view_type", d.value) if this.props.view_type is None else None)),
+                                        utils.session_storage.set("view_type", d.value) if utils.is_invalid(this.props.view_type) else None)),
 
 
     'toggle_sort_desc': lambda d: all((this.setState({'sort_desc': not this.state.sort_desc}),
@@ -179,7 +190,7 @@ ItemViewPage = createReactClass({
             on_search=this.on_search,
             on_toggle_config=this.toggle_config,
             cfg_suffix=this.config_suffix,
-        )),
+        ), fixed=True),
 
     'componentWillMount': lambda: this.update_menu(),
 

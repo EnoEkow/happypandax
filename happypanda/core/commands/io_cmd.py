@@ -161,22 +161,29 @@ class ImageItem(AsyncCommand):
                 image_path = BytesIO()
 
             save_image = True
-            if size.width and size.height:
+            use_original = False
+            if size.width or size.height:
                 im = Image.open(fs_bytes)
-                im = self._convert(im, img_ext=ext)
+                im_size = (size.width or 999999999, size.height or 999999999)
+                if im.size > im_size:
+                    im = self._convert(im, img_ext=ext)
 
-                if ext.lower().endswith(".gif"):
-                    new_frame = Image.new('RGBA', im.size)
-                    new_frame.paste(im, (0, 0), im.convert('RGBA'))
-                    im.close()
-                    im = new_frame
-                im.thumbnail((size.width, size.height), Image.ANTIALIAS)
+                    if ext.lower().endswith(".gif"):
+                        new_frame = Image.new('RGBA', im.size)
+                        new_frame.paste(im, (0, 0), im.convert('RGBA'))
+                        im.close()
+                        im = new_frame
+                    im.thumbnail(im_size, Image.ANTIALIAS)
+                else:
+                    use_original = True
             else:
-                if self.properties.create_symlink and isinstance(image_path, str):
-                    image_path = image_path + constants.link_ext
-                    with open(image_path, 'w', encoding='utf-8') as f:
-                        f.write(fs.path)
-                    save_image = False
+                use_original = True
+
+            if use_original and self.properties.create_symlink and isinstance(image_path, str):
+                image_path = image_path + constants.link_ext
+                with open(image_path, 'w', encoding='utf-8') as f:
+                    f.write(fs.path)
+                save_image = False
 
             if save_image and im:
                 im.save(image_path)
@@ -232,8 +239,11 @@ class CoreFS(CoreCommand):
     CBR = '.cbr'
     CBZ = '.cbz'
     TARGZ = '.tar.gz'
+    TGZ = '.tgz'
     TARBZ2 = '.tar.bz2'
+    TBZ = '.tbz'
     TARXZ = '.tar.xz'
+    TXZ = '.txz'
 
     JPG = '.jpg'
     JPEG = '.jpeg'
@@ -295,8 +305,7 @@ class CoreFS(CoreCommand):
 
     @_archive_formats.default()
     def _archive_formats_def():
-        return (CoreFS.ZIP, CoreFS.RAR, CoreFS.CBR, CoreFS.CBZ, CoreFS.TARGZ,
-                CoreFS.TARBZ2, CoreFS.TARXZ)
+        return Archive._def_formats()
 
     @_image_formats.default()
     def _image_formats_def():
@@ -708,8 +717,9 @@ class Archive(CoreCommand):
     _archive_obj_ref_count = {}
 
     def _def_formats():
-        return (CoreFS.ZIP, CoreFS.RAR, CoreFS.CBZ, CoreFS.CBR, CoreFS.TARBZ2,
-                CoreFS.TARGZ, CoreFS.TARXZ)
+        return (CoreFS.ZIP, CoreFS.RAR, CoreFS.CBZ, CoreFS.CBR,
+                CoreFS.TARBZ2, CoreFS.TARGZ, CoreFS.TARXZ,
+                CoreFS.TBZ, CoreFS.TGZ, CoreFS.TXZ)
 
     def __init__(self, fpath: str):
         self._opened = False
@@ -1093,6 +1103,7 @@ class GalleryFS(CoreCommand):
                         dbpage.number = n
                         self.gallery.pages.append(dbpage, enable_count_cache=True)
                         self.pages[n] = p
+                self.gallery.pages.reorder()
             self._loaded_pages = True
 
     def evaluate(self, raise_error=False):
